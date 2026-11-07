@@ -1,0 +1,46 @@
+rules_version = '2';
+
+// Правила доступа к базе: каждый видит только свои чаты и пишет только от своего имени.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function me() { return request.auth.uid; }
+
+    // Профили: читать может любой вошедший (чтобы находить друг друга), менять — только свой
+    match /users/{uid} {
+      allow read: if signedIn();
+      allow create, update: if signedIn() && me() == uid
+        && request.resource.data.username is string
+        && request.resource.data.username.matches('^[a-z0-9_]{3,20}$');
+    }
+
+    // Занятые имена @username: одно имя — один владелец
+    match /usernames/{name} {
+      allow read: if signedIn();
+      allow create: if signedIn() && request.resource.data.uid == me()
+        && name.matches('^[a-z0-9_]{3,20}$');
+      allow delete: if signedIn() && resource.data.uid == me();
+    }
+
+    // Чаты на двоих: доступ только участникам
+    match /chats/{chatId} {
+      allow read: if signedIn() && me() in resource.data.members;
+      allow create: if signedIn() && me() in request.resource.data.members
+        && request.resource.data.members.size() == 2;
+      allow update: if signedIn() && me() in resource.data.members
+        && request.resource.data.members == resource.data.members;
+
+      match /messages/{msgId} {
+        function member() {
+          return me() in get(/databases/$(database)/documents/chats/$(chatId)).data.members;
+        }
+        allow read: if signedIn() && member();
+        allow create: if signedIn() && member()
+          && request.resource.data.from == me()
+          && request.resource.data.text is string
+          && request.resource.data.text.size() <= 4000;
+      }
+    }
+  }
+}

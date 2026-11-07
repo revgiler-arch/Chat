@@ -1,0 +1,47 @@
+{
+  "project_info": {
+    "project_number": "1004817607182",
+    "project_id": "chat-59902",
+    "storage_bucket": "chat-59902.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1004817607182:android:d6541f9331c9df5b5c2a5f",
+        "android_client_info": {
+          "package_name": "com.revgiler.messenger"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "1004817607182-rip1h47k2443m01g7qfd81prveusm6na.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.revgiler.messenger",
+            "certificate_hash": "0599308162c564e61fb474daa748ff71220e5adf"
+          }
+        },
+        {
+          "client_id": "1004817607182-3da01ue6al7hc9fr7h9m83j9iu2binpc.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCRK6kPDzcLDqw7_2ry_-sZZJ79OuFN61c"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "1004817607182-3da01ue6al7hc9fr7h9m83j9iu2binpc.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

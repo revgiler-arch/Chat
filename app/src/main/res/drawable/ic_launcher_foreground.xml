@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Облачко сообщения с тремя точками -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <path android:fillColor="#FFFFFFFF"
+        android:pathData="M54,32c-13.8,0 -25,9.4 -25,21c0,5.9 2.9,11.2 7.6,15l-2.6,9.5l10.6,-5.3c2.9,1 6.1,1.6 9.4,1.6c13.8,0 25,-9.4 25,-21s-11.2,-20.8 -25,-20.8z" />
+    <path android:fillColor="#FF6C5CE7"
+        android:pathData="M43,53m-3.2,0a3.2,3.2 0,1 1,6.4 0a3.2,3.2 0,1 1,-6.4 0 M54,53m-3.2,0a3.2,3.2 0,1 1,6.4 0a3.2,3.2 0,1 1,-6.4 0 M65,53m-3.2,0a3.2,3.2 0,1 1,6.4 0a3.2,3.2 0,1 1,-6.4 0" />
+</vector>
