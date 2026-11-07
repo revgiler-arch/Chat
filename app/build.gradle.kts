@@ -62,6 +62,10 @@ dependencies {
     implementation(platform("com.google.firebase:firebase-bom:33.7.0"))
     implementation("com.google.firebase:firebase-auth")
     implementation("com.google.firebase:firebase-firestore")
+    implementation("com.google.firebase:firebase-messaging")
+
+    // Звонки: готовая сборка WebRTC (та же библиотека, что в Chrome)
+    implementation("io.getstream:stream-webrtc-android:1.3.8")
 
     // Вход через Google (Credential Manager)
     implementation("androidx.credentials:credentials:1.3.0")

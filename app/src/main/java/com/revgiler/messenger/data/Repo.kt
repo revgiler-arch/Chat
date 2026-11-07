@@ -2,11 +2,13 @@ package com.revgiler.messenger.data
 
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.GoogleAuthProvider
+import com.google.firebase.firestore.Blob
 import com.google.firebase.firestore.DocumentSnapshot
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.Query
 import com.google.firebase.firestore.SetOptions
+import com.google.firebase.messaging.FirebaseMessaging
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
@@ -36,6 +38,10 @@ data class Message(
     val at: Long,
     /** Ещё не дошло до сервера (нет сети). */
     val pending: Boolean,
+    /** "text", "voice" или "call" (запись о звонке). */
+    val type: String = "text",
+    val mediaId: String? = null,
+    val durationMs: Long = 0,
 )
 
 class UsernameTaken : Exception("Это имя уже занято")
@@ -55,9 +61,31 @@ object Repo {
         auth.signInWithCredential(GoogleAuthProvider.getCredential(idToken, null)).await()
     }
 
-    fun signOut() {
+    suspend fun signOut() {
+        runCatching { unregisterPush() }
         profiles.clear()
         auth.signOut()
+    }
+
+    // ---------------------------------------------------------------- push-токены
+
+    /** Сохранить токен этого телефона, чтобы сервер мог присылать сюда уведомления. */
+    suspend fun registerPush() {
+        val token = FirebaseMessaging.getInstance().token.await()
+        savePushToken(token)
+    }
+
+    fun savePushToken(token: String) {
+        val me = uid ?: return
+        db.collection("users").document(me)
+            .update("fcmTokens", FieldValue.arrayUnion(token))
+    }
+
+    private suspend fun unregisterPush() {
+        val me = uid ?: return
+        val token = FirebaseMessaging.getInstance().token.await()
+        db.collection("users").document(me).update("fcmTokens", FieldValue.arrayRemove(token)).await()
+        FirebaseMessaging.getInstance().deleteToken().await()
     }
 
     // ---------------------------------------------------------------- профили
@@ -180,6 +208,9 @@ object Repo {
                         id = d.id,
                         fromMe = d.getString("from") == me,
                         text = d.getString("text").orEmpty(),
+                        type = d.getString("type") ?: "text",
+                        mediaId = d.getString("mediaId"),
+                        durationMs = d.getLong("duration") ?: 0L,
                         // пока сервер не поставил время — берём оценку, чтобы сообщение сразу встало на место
                         at = d.getTimestamp("at", DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)?.toDate()?.time
                             ?: System.currentTimeMillis(),
@@ -210,6 +241,64 @@ object Repo {
                     "lastAt" to FieldValue.serverTimestamp(),
                     "read" to mapOf(me to FieldValue.serverTimestamp()),
                 ),
+                SetOptions.merge(),
+            )
+            .commit()
+            .addOnSuccessListener { Push.notify(chatId) }
+    }
+
+    /**
+     * Голосовое сообщение. Звук (AAC, ~24 кбит/с) хранится прямо в Firestore отдельным документом —
+     * так не нужно платное хранилище файлов. Предел документа 1 МБ ≈ 5 минут записи.
+     */
+    fun sendVoice(chatId: String, audio: ByteArray, durationMs: Long) {
+        val me = uid ?: return
+        val chatRef = db.collection("chats").document(chatId)
+        val media = chatRef.collection("media").document()
+        db.batch()
+            .set(media, mapOf("from" to me, "data" to Blob.fromBytes(audio), "mime" to "audio/mp4", "at" to FieldValue.serverTimestamp()))
+            .set(
+                chatRef.collection("messages").document(),
+                mapOf(
+                    "from" to me, "text" to "", "type" to "voice", "mediaId" to media.id,
+                    "duration" to durationMs, "at" to FieldValue.serverTimestamp(),
+                ),
+            )
+            .set(
+                chatRef,
+                mapOf(
+                    "lastText" to "🎤 Голосовое сообщение",
+                    "lastFrom" to me,
+                    "lastAt" to FieldValue.serverTimestamp(),
+                    "read" to mapOf(me to FieldValue.serverTimestamp()),
+                ),
+                SetOptions.merge(),
+            )
+            .commit()
+            .addOnSuccessListener { Push.notify(chatId) }
+    }
+
+    suspend fun loadMedia(chatId: String, mediaId: String): ByteArray {
+        val doc = db.collection("chats").document(chatId).collection("media").document(mediaId).get().await()
+        return doc.getBlob("data")?.toBytes() ?: error("Файл не найден")
+    }
+
+    /** Запись о звонке в переписке («Исходящий звонок, 3 мин»). */
+    fun logCall(chatId: String, video: Boolean, durationMs: Long, missed: Boolean) {
+        val me = uid ?: return
+        val text = when {
+            missed -> if (video) "Видеозвонок без ответа" else "Звонок без ответа"
+            else -> if (video) "Видеозвонок" else "Звонок"
+        }
+        val chatRef = db.collection("chats").document(chatId)
+        db.batch()
+            .set(
+                chatRef.collection("messages").document(),
+                mapOf("from" to me, "text" to text, "type" to "call", "duration" to durationMs, "at" to FieldValue.serverTimestamp()),
+            )
+            .set(
+                chatRef,
+                mapOf("lastText" to "📞 $text", "lastFrom" to me, "lastAt" to FieldValue.serverTimestamp()),
                 SetOptions.merge(),
             )
             .commit()

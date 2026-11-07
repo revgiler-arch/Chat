@@ -39,7 +39,37 @@ service cloud.firestore {
         allow create: if signedIn() && member()
           && request.resource.data.from == me()
           && request.resource.data.text is string
-          && request.resource.data.text.size() <= 4000;
+          && request.resource.data.text.size() <= 4000
+          && request.resource.data.get('type', 'text') in ['text', 'voice', 'call'];
+      }
+
+      // Голосовые сообщения: звук хранится прямо в документе (до ~1 МБ)
+      match /media/{mediaId} {
+        function memberM() {
+          return me() in get(/databases/$(database)/documents/chats/$(chatId)).data.members;
+        }
+        allow read: if signedIn() && memberM();
+        allow create: if signedIn() && memberM()
+          && request.resource.data.from == me()
+          && request.resource.data.data is bytes
+          && request.resource.data.data.size() <= 1000000;
+      }
+    }
+
+    // Звонки: служебный документ для установки соединения (WebRTC). Доступ — только двум участникам.
+    match /calls/{callId} {
+      allow read: if signedIn() && (resource.data.from == me() || resource.data.to == me());
+      allow create: if signedIn() && request.resource.data.from == me();
+      allow update: if signedIn() && (resource.data.from == me() || resource.data.to == me())
+        && request.resource.data.from == resource.data.from
+        && request.resource.data.to == resource.data.to;
+
+      match /{side}/{candidateId} {
+        function party() {
+          let c = get(/databases/$(database)/documents/calls/$(callId)).data;
+          return me() == c.from || me() == c.to;
+        }
+        allow read, create: if signedIn() && party();
       }
     }
   }

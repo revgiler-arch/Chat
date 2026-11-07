@@ -1,6 +1,28 @@
 package com.revgiler.messenger.ui
 
+import android.Manifest
 import android.app.Activity
+import android.content.pm.PackageManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.material.icons.filled.Call
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.ContextCompat
+import com.revgiler.messenger.call.CallActivity
+import com.revgiler.messenger.voice.VoicePlayer
+import com.revgiler.messenger.voice.VoiceRecorder
+import kotlinx.coroutines.delay
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -88,6 +110,7 @@ fun MessengerApp(vm: MainVm, activity: Activity) {
                     Screen.NewChat -> NewChatScreen(vm)
                     Screen.Settings -> SettingsScreen(vm, a.me)
                     is Screen.Conversation -> ConversationScreen(vm, s.chatId, s.other)
+                    is Screen.Wallpaper -> WallpaperScreen(s.chatId) { vm.back() }
                 }
             }
             vm.error?.let { ErrorBar(it) { vm.error = null } }
@@ -318,12 +341,47 @@ private fun NewChatScreen(vm: MainVm) {
 
 @Composable
 private fun ConversationScreen(vm: MainVm, chatId: String, other: Profile) {
+    val ctx = LocalContext.current
     var text by rememberSaveable(chatId) { mutableStateOf("") }
     val listState = rememberLazyListState()
     val msgs = vm.messages
+    // обои перечитываем при каждом возвращении на экран (могли поменять в настройках)
+    val wallpaper = remember(chatId, vm.stack.size) { Wallpapers.get(ctx, chatId) }
+    var menu by remember { mutableStateOf(false) }
+    val recorder = remember { VoiceRecorder(ctx) }
+    var recording by remember { mutableStateOf(false) }
+    var recordMs by remember { mutableLongStateOf(0L) }
+    val micPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) recording = recorder.start()
+    }
+    fun startRecording() {
+        if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            VoicePlayer.stop()
+            recording = recorder.start()
+        } else {
+            micPermission.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
+    fun finishRecording(send: Boolean) {
+        if (send) recorder.stop()?.let { (bytes, dur) -> vm.sendVoice(chatId, bytes, dur) } else recorder.cancel()
+        recording = false
+        recordMs = 0
+    }
+    LaunchedEffect(recording) {
+        while (recording) {
+            recordMs = recorder.elapsedMs
+            if (recordMs >= VoiceRecorder.MAX_MS) { finishRecording(true); break }
+            delay(200)
+        }
+    }
+    DisposableEffect(Unit) { onDispose { recorder.cancel() } }
     LaunchedEffect(msgs.size) {
         if (msgs.isNotEmpty()) listState.animateScrollToItem(msgs.lastIndex)
     }
+    fun call(video: Boolean) {
+        ctx.startActivity(CallActivity.outgoing(ctx, other.uid, chatId, other.name, video))
+    }
+
     Column(Modifier.fillMaxSize().imePadding()) {
         Row(
             Modifier.fillMaxWidth().background(C.Surface).padding(horizontal = 4.dp, vertical = 6.dp),
@@ -332,23 +390,37 @@ private fun ConversationScreen(vm: MainVm, chatId: String, other: Profile) {
             IconButton(onClick = { vm.back() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = C.Text) }
             Avatar(other, 40.dp)
             Spacer(Modifier.width(10.dp))
-            Column {
-                Text(other.name, color = C.Text, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
-                Text("@${other.username}", color = C.TextDim, fontSize = 13.sp)
+            Column(Modifier.weight(1f)) {
+                Text(other.name, color = C.Text, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text("@${other.username}", color = C.TextDim, fontSize = 13.sp, maxLines = 1)
+            }
+            IconButton(onClick = { call(false) }) { Icon(Icons.Filled.Call, "Звонок", tint = C.Text) }
+            IconButton(onClick = { call(true) }) { Icon(Icons.Filled.Videocam, "Видеозвонок", tint = C.Text) }
+            Box {
+                IconButton(onClick = { menu = true }) { Icon(Icons.Filled.MoreVert, "Ещё", tint = C.Text) }
+                DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                    DropdownMenuItem(text = { Text("Обои чата") }, onClick = {
+                        menu = false
+                        vm.open(Screen.Wallpaper(chatId))
+                    })
+                }
             }
         }
-        LazyColumn(
-            state = listState,
-            modifier = Modifier.weight(1f).fillMaxWidth(),
-            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
-            items(msgs.size, key = { msgs[it].id }) { i ->
-                val m = msgs[i]
-                val prev = msgs.getOrNull(i - 1)
-                Column {
-                    if (prev == null || !sameDay(prev.at, m.at)) DayLabel(m.at)
-                    Bubble(m)
+        Box(Modifier.weight(1f).fillMaxWidth()) {
+            WallpaperBackground(wallpaper, Modifier.fillMaxSize())
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                items(msgs.size, key = { msgs[it].id }) { i ->
+                    val m = msgs[i]
+                    val prev = msgs.getOrNull(i - 1)
+                    Column(Modifier.fillMaxWidth()) {
+                        if (prev == null || !sameDay(prev.at, m.at)) DayLabel(m.at)
+                        Bubble(m, chatId)
+                    }
                 }
             }
         }
@@ -356,31 +428,54 @@ private fun ConversationScreen(vm: MainVm, chatId: String, other: Profile) {
             Modifier.fillMaxWidth().background(C.Surface).padding(8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            OutlinedTextField(
-                value = text, onValueChange = { text = it.take(4000) },
-                placeholder = { Text("Сообщение") },
-                maxLines = 5,
-                keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
-                shape = RoundedCornerShape(22.dp),
-                colors = fieldColors(),
-                modifier = Modifier.weight(1f),
-            )
-            Spacer(Modifier.width(6.dp))
-            IconButton(
-                onClick = {
-                    vm.send(chatId, text)
-                    text = ""
-                },
-                enabled = text.isNotBlank(),
-                modifier = Modifier.size(48.dp).background(if (text.isNotBlank()) C.Accent else C.SurfaceHi, CircleShape),
-            ) { Icon(Icons.AutoMirrored.Filled.Send, "Отправить", tint = Color.White) }
+            if (recording) {
+                IconButton(onClick = { finishRecording(false) }) { Icon(Icons.Filled.Delete, "Отменить", tint = C.Bad) }
+                Box(Modifier.size(10.dp).background(C.Bad, CircleShape))
+                Text(
+                    "  Запись  ${duration(recordMs)}", color = C.Text, fontSize = 16.sp,
+                    modifier = Modifier.weight(1f).padding(vertical = 14.dp),
+                )
+                IconButton(
+                    onClick = { finishRecording(true) },
+                    modifier = Modifier.size(48.dp).background(C.Accent, CircleShape),
+                ) { Icon(Icons.AutoMirrored.Filled.Send, "Отправить", tint = Color.White) }
+            } else {
+                OutlinedTextField(
+                    value = text, onValueChange = { text = it.take(4000) },
+                    placeholder = { Text("Сообщение") },
+                    maxLines = 5,
+                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
+                    shape = RoundedCornerShape(22.dp),
+                    colors = fieldColors(),
+                    modifier = Modifier.weight(1f),
+                )
+                Spacer(Modifier.width(6.dp))
+                if (text.isBlank()) {
+                    IconButton(
+                        onClick = { startRecording() },
+                        modifier = Modifier.size(48.dp).background(C.Accent, CircleShape),
+                    ) { Icon(Icons.Filled.Mic, "Голосовое сообщение", tint = Color.White) }
+                } else {
+                    IconButton(
+                        onClick = {
+                            vm.send(chatId, text)
+                            text = ""
+                        },
+                        modifier = Modifier.size(48.dp).background(C.Accent, CircleShape),
+                    ) { Icon(Icons.AutoMirrored.Filled.Send, "Отправить", tint = Color.White) }
+                }
+            }
         }
     }
 }
 
 @Composable
-private fun Bubble(m: Message) {
-    Box(Modifier.fillMaxWidth(), contentAlignment = if (m.fromMe) Alignment.CenterEnd else Alignment.CenterStart) {
+private fun Bubble(m: Message, chatId: String) {
+    val ctx = LocalContext.current
+    Row(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = if (m.fromMe) Arrangement.End else Arrangement.Start,
+    ) {
         Column(
             Modifier.widthIn(max = 300.dp)
                 .background(
@@ -393,7 +488,40 @@ private fun Bubble(m: Message) {
                 )
                 .padding(horizontal = 12.dp, vertical = 8.dp),
         ) {
-            Text(m.text, color = C.Text, fontSize = 16.sp)
+            when (m.type) {
+                "voice" -> {
+                    val id = m.mediaId
+                    val isCurrent = VoicePlayer.currentId == id
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.width(220.dp)) {
+                        IconButton(
+                            onClick = { if (id != null) VoicePlayer.toggle(ctx, chatId, id) },
+                            modifier = Modifier.size(40.dp).background(Color.White.copy(alpha = 0.15f), CircleShape),
+                        ) {
+                            if (VoicePlayer.loadingId == id) CircularProgressIndicator(Modifier.size(18.dp), color = Color.White, strokeWidth = 2.dp)
+                            else Icon(if (isCurrent && VoicePlayer.playing) Icons.Filled.Pause else Icons.Filled.PlayArrow, null, tint = Color.White)
+                        }
+                        Spacer(Modifier.width(10.dp))
+                        Column(Modifier.weight(1f)) {
+                            LinearProgressIndicator(
+                                progress = { if (isCurrent) VoicePlayer.progress else 0f },
+                                color = Color.White, trackColor = Color.White.copy(alpha = 0.25f),
+                                modifier = Modifier.fillMaxWidth().height(3.dp),
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            Text(duration(m.durationMs), color = C.Text.copy(alpha = 0.75f), fontSize = 12.sp)
+                        }
+                    }
+                }
+                "call" -> Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Filled.Call, null, tint = C.Text.copy(alpha = 0.8f), modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        m.text + if (m.durationMs > 0) ", ${duration(m.durationMs)}" else "",
+                        color = C.Text, fontSize = 15.sp,
+                    )
+                }
+                else -> Text(m.text, color = C.Text, fontSize = 16.sp)
+            }
             Row(Modifier.align(Alignment.End), verticalAlignment = Alignment.CenterVertically) {
                 Text(clock(m.at), color = C.Text.copy(alpha = 0.6f), fontSize = 11.sp)
                 if (m.pending) {
@@ -447,6 +575,8 @@ private fun SettingsScreen(vm: MainVm, me: Profile) {
         Spacer(Modifier.height(20.dp))
         OutlinedButton(onClick = { editing = true }, modifier = Modifier.fillMaxWidth()) { Text("Изменить имя или @username") }
         Spacer(Modifier.height(10.dp))
+        OutlinedButton(onClick = { vm.open(Screen.Wallpaper(null)) }, modifier = Modifier.fillMaxWidth()) { Text("Обои чатов") }
+        Spacer(Modifier.height(10.dp))
         OutlinedButton(
             onClick = { if (vm.update != null) vm.installUpdate() else vm.checkUpdate(silent = false) },
             modifier = Modifier.fillMaxWidth(),
@@ -475,6 +605,12 @@ private fun fieldColors() = OutlinedTextFieldDefaults.colors(
     focusedContainerColor = C.Bg,
     unfocusedContainerColor = C.Bg,
 )
+
+private fun duration(ms: Long): String {
+    val sec = ms / 1000
+    return if (sec >= 3600) String.format(Locale.US, "%d:%02d:%02d", sec / 3600, sec % 3600 / 60, sec % 60)
+    else String.format(Locale.US, "%d:%02d", sec / 60, sec % 60)
+}
 
 private fun clock(t: Long) = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(t))
 

@@ -14,7 +14,11 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
 import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
+import com.revgiler.messenger.App
+import com.revgiler.messenger.Notifier
 import com.revgiler.messenger.R
+import com.revgiler.messenger.call.CallActivity
+import com.revgiler.messenger.data.CallSignal
 import com.revgiler.messenger.data.Chat
 import com.revgiler.messenger.data.Message
 import com.revgiler.messenger.data.Profile
@@ -38,6 +42,8 @@ sealed interface Screen {
     data object NewChat : Screen
     data object Settings : Screen
     data class Conversation(val chatId: String, val other: Profile) : Screen
+    /** Обои: chatId == null — общие для всех чатов. */
+    data class Wallpaper(val chatId: String?) : Screen
 }
 
 class MainVm(app: Application) : AndroidViewModel(app) {
@@ -60,6 +66,9 @@ class MainVm(app: Application) : AndroidViewModel(app) {
         private set
     private var chatsJob: Job? = null
     private var messagesJob: Job? = null
+    private var callsJob: Job? = null
+    /** Чат из уведомления, нажатого до того, как загрузился профиль. */
+    private var pendingChatId: String? = null
 
     var found by mutableStateOf<Profile?>(null)
         private set
@@ -88,7 +97,12 @@ class MainVm(app: Application) : AndroidViewModel(app) {
             runCatching { Repo.myProfile() }
                 .onSuccess { p ->
                     auth = if (p == null) AuthState.NeedUsername else AuthState.Ready(p)
-                    if (p != null) startChats()
+                    if (p != null) {
+                        startChats()
+                        startIncomingCalls()
+                        launch { runCatching { Repo.registerPush() } }
+                        pendingChatId?.let { pendingChatId = null; openChatById(it) }
+                    }
                 }
                 .onFailure {
                     error = "Не удалось загрузить профиль: ${it.message}"
@@ -148,7 +162,8 @@ class MainVm(app: Application) : AndroidViewModel(app) {
     fun signOut() {
         chatsJob?.cancel()
         messagesJob?.cancel()
-        Repo.signOut()
+        callsJob?.cancel()
+        viewModelScope.launch { Repo.signOut() }
         chats = emptyList()
         people = emptyMap()
         stack.clear()
@@ -164,7 +179,11 @@ class MainVm(app: Application) : AndroidViewModel(app) {
             searchStatus = null
         }
         stack.add(s)
-        if (s is Screen.Conversation) startMessages(s.chatId)
+        if (s is Screen.Conversation) {
+            startMessages(s.chatId)
+            App.visibleChatId = s.chatId
+            Notifier.clearChat(getApplication(), s.chatId)
+        }
     }
 
     fun back(): Boolean {
@@ -174,7 +193,10 @@ class MainVm(app: Application) : AndroidViewModel(app) {
             messagesJob?.cancel()
             messages = emptyList()
             Repo.markRead(left.chatId)
+            App.visibleChatId = null
+            com.revgiler.messenger.voice.VoicePlayer.stop()
         }
+        (screen as? Screen.Conversation)?.let { App.visibleChatId = it.chatId }
         return true
     }
 
@@ -235,6 +257,45 @@ class MainVm(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** Открыть чат по id (из уведомления). */
+    fun openChatById(chatId: String) {
+        val me = Repo.uid ?: return
+        if (auth !is AuthState.Ready) { pendingChatId = chatId; return }
+        if ((screen as? Screen.Conversation)?.chatId == chatId) return
+        val other = chatId.split("_").firstOrNull { it != me } ?: return
+        viewModelScope.launch {
+            val p = people[other] ?: runCatching { Repo.profile(other) }.getOrNull() ?: return@launch
+            people = people + (other to p)
+            while (stack.size > 1) back()
+            open(Screen.Conversation(chatId, p))
+        }
+    }
+
+    fun onResume() {
+        (screen as? Screen.Conversation)?.let {
+            App.visibleChatId = it.chatId
+            Notifier.clearChat(getApplication(), it.chatId)
+        }
+    }
+
+    /**
+     * Входящие звонки, пока приложение открыто: так звонки работают,
+     * даже если сервер уведомлений ещё не настроен.
+     */
+    private fun startIncomingCalls() {
+        callsJob?.cancel()
+        callsJob = viewModelScope.launch {
+            CallSignal.incoming().catch { }.collect { call ->
+                if (System.currentTimeMillis() - call.createdAt > 50_000) return@collect // старый звонок
+                if (App.activeCallId == call.id) return@collect
+                val name = runCatching { Repo.profile(call.from)?.name }.getOrNull() ?: "Звонок"
+                val ctx = getApplication<Application>()
+                runCatching { ctx.startActivity(CallActivity.incoming(ctx, call.id, name, call.video)) }
+                    .onFailure { Notifier.showIncomingCall(ctx, call.id, name, call.video) }
+            }
+        }
+    }
+
     fun openChat(chat: Chat) {
         val other = people[chat.otherUid] ?: return
         open(Screen.Conversation(chat.id, other))
@@ -256,6 +317,8 @@ class MainVm(app: Application) : AndroidViewModel(app) {
     }
 
     fun send(chatId: String, text: String) = Repo.send(chatId, text)
+
+    fun sendVoice(chatId: String, audio: ByteArray, durationMs: Long) = Repo.sendVoice(chatId, audio, durationMs)
 
     // ---------------------------------------------------------------- обновления
 

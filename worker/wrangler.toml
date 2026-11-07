@@ -1,0 +1,6 @@
+name = "chat-push"
+main = "index.js"
+compatibility_date = "2024-11-01"
+
+[vars]
+PROJECT_ID = "chat-59902"

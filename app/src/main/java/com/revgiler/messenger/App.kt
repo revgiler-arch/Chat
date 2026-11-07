@@ -6,6 +6,7 @@ class App : Application() {
     override fun onCreate() {
         super.onCreate()
         instance = this
+        Notifier.ensureChannels(this)
     }
 
     fun versionName(): String = runCatching {
@@ -15,5 +16,13 @@ class App : Application() {
     companion object {
         lateinit var instance: App
             private set
+
+        /** Открытый сейчас чат: для него не показываем уведомления. */
+        @Volatile
+        var visibleChatId: String? = null
+
+        /** Идущий звонок (чтобы не показывать о нём уведомление повторно). */
+        @Volatile
+        var activeCallId: String? = null
     }
 }
