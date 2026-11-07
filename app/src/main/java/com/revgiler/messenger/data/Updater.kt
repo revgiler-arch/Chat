@@ -19,7 +19,7 @@ data class UpdateInfo(val versionCode: Long, val apkUrl: String)
 
 /** Проверка и установка обновлений из публичного раздела Releases на GitHub. */
 object Updater {
-    private const val RELEASE_API = "https://api.github.com/repos/revgiler-arch/Messenger/releases/tags/latest"
+    private const val RELEASE_API = "https://api.github.com/repos/revgiler-arch/Chat/releases/tags/latest"
 
     private val http = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
