@@ -19,7 +19,14 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -115,6 +122,8 @@ class CallActivity : ComponentActivity() {
     private var proximity: PowerManager.WakeLock? = null
     private var logged = false
     private var pendingAccept: (() -> Unit)? = null
+    private var controlsVisible by mutableStateOf(true)
+    private var controlsTick by mutableLongStateOf(0L)
     private var ringtone: Ringtone? = null
     private var vibrating = false
 
@@ -522,8 +531,24 @@ class CallActivity : ComponentActivity() {
             val s = session
             val remote = remoteTrack
             val local = localTrack
+            // Во время видеозвонка кнопки уезжают вниз; нажатие по экрану возвращает их
+            val autoHide = video && remote != null && phase == Phase.Connected
+            LaunchedEffect(autoHide, controlsVisible, controlsTick) {
+                if (!autoHide) {
+                    controlsVisible = true
+                } else if (controlsVisible) {
+                    delay(4000)
+                    controlsVisible = false
+                }
+            }
             if (video && remote != null && s != null && phase == Phase.Connected) {
                 VideoView(s, remote, mirror = false, modifier = Modifier.fillMaxSize())
+                Box(
+                    Modifier.fillMaxSize().clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                    ) { controlsVisible = !controlsVisible },
+                )
             }
             Column(
                 Modifier.fillMaxSize().safeDrawingPadding().padding(24.dp),
@@ -548,7 +573,11 @@ class CallActivity : ComponentActivity() {
                         RoundButton(if (video) Icons.Filled.Videocam else Icons.Filled.Call, "Ответить", Color(0xFF30A46C)) { accept() }
                     }
                     Phase.Ended -> {}
-                    else -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    else -> AnimatedVisibility(
+                        visible = controlsVisible,
+                        enter = slideInVertically { it } + fadeIn(),
+                        exit = slideOutVertically { it } + fadeOut(),
+                    ) { Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
                             SmallToggle(if (muted) Icons.Filled.MicOff else Icons.Filled.Mic, if (muted) "Микрофон выкл." else "Микрофон", muted) {
                                 muted = !muted
@@ -568,7 +597,7 @@ class CallActivity : ComponentActivity() {
                         }
                         Spacer(Modifier.height(28.dp))
                         RoundButton(Icons.Filled.CallEnd, "Завершить", Color(0xFFE5484D)) { hangUp() }
-                    }
+                    } }
                 }
                 Spacer(Modifier.height(24.dp))
             }
@@ -635,7 +664,10 @@ class CallActivity : ComponentActivity() {
     private fun SmallToggle(icon: ImageVector, label: String, active: Boolean, onClick: () -> Unit) {
         Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.width(76.dp)) {
             IconButton(
-                onClick = onClick,
+                onClick = {
+                    controlsTick++ // пока нажимают кнопки, панель не прячем
+                    onClick()
+                },
                 modifier = Modifier.size(56.dp).background(if (active) Color.White else Color(0x33FFFFFF), CircleShape),
             ) {
                 Icon(icon, label, tint = if (active) Color(0xFF101318) else Color.White)
