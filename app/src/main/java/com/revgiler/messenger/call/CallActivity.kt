@@ -5,10 +5,15 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.AudioDeviceInfo
+import android.media.AudioAttributes
 import android.media.AudioManager
+import android.media.Ringtone
+import android.media.RingtoneManager
 import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
+import android.os.VibrationEffect
+import android.os.Vibrator
 import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -110,6 +115,8 @@ class CallActivity : ComponentActivity() {
     private var proximity: PowerManager.WakeLock? = null
     private var logged = false
     private var pendingAccept: (() -> Unit)? = null
+    private var ringtone: Ringtone? = null
+    private var vibrating = false
 
     private val permissions = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { _ ->
         // В ответе есть только то, что спрашивали сейчас, поэтому смотрим фактическое состояние.
@@ -159,6 +166,7 @@ class CallActivity : ComponentActivity() {
             phase = Phase.Ringing
             status = if (video) "Входящий видеозвонок" else "Входящий звонок"
             watchCall()
+            startRinging() // уведомление снято выше, и его мелодия остановилась
             when (intent.getStringExtra(EXTRA_ACTION)) {
                 ACTION_ACCEPT -> accept()
                 ACTION_DECLINE -> decline()
@@ -230,6 +238,7 @@ class CallActivity : ComponentActivity() {
 
     private fun accept() {
         if (phase != Phase.Ringing) return
+        stopRinging()
         withPermissions {
             phase = Phase.Connecting
             status = "Соединяю…"
@@ -381,6 +390,7 @@ class CallActivity : ComponentActivity() {
     }
 
     private fun release() {
+        stopRinging()
         watchJob?.cancel()
         regs.forEach { it.remove() }
         regs.clear()
@@ -422,6 +432,38 @@ class CallActivity : ComponentActivity() {
     // ---------------------------------------------------------------- звук
 
     private val audio get() = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+
+    private fun startRinging() {
+        if (ringtone != null || vibrating) return
+        val uri = RingtoneManager.getActualDefaultRingtoneUri(this, RingtoneManager.TYPE_RINGTONE)
+            ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
+        ringtone = runCatching {
+            RingtoneManager.getRingtone(this, uri)?.apply {
+                audioAttributes = AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                    .build()
+                if (Build.VERSION.SDK_INT >= 28) isLooping = true
+                play()
+            }
+        }.getOrNull()
+        if (audio.ringerMode != AudioManager.RINGER_MODE_SILENT) {
+            runCatching {
+                (getSystemService(Context.VIBRATOR_SERVICE) as Vibrator)
+                    .vibrate(VibrationEffect.createWaveform(longArrayOf(0, 800, 600), 0))
+                vibrating = true
+            }
+        }
+    }
+
+    private fun stopRinging() {
+        runCatching { ringtone?.stop() }
+        ringtone = null
+        if (vibrating) {
+            runCatching { (getSystemService(Context.VIBRATOR_SERVICE) as Vibrator).cancel() }
+            vibrating = false
+        }
+    }
 
     private fun setupAudio() {
         audio.mode = AudioManager.MODE_IN_COMMUNICATION

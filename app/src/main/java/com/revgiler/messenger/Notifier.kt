@@ -8,6 +8,7 @@ import android.content.Intent
 import android.media.AudioAttributes
 import android.media.RingtoneManager
 import android.os.Build
+import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import com.revgiler.messenger.call.CallActivity
@@ -101,6 +102,21 @@ object Notifier {
             .addAction(0, "Ответить", accept)
             .build()
         notify(ctx, id, n)
+        wakeScreen(ctx)
+    }
+
+    /** Включает экран, даже если система не разрешила полноэкранный показ уведомления. */
+    @Suppress("DEPRECATION")
+    private fun wakeScreen(ctx: Context) {
+        runCatching {
+            val pm = ctx.getSystemService(Context.POWER_SERVICE) as PowerManager
+            if (!pm.isInteractive) {
+                pm.newWakeLock(
+                    PowerManager.FULL_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP or PowerManager.ON_AFTER_RELEASE,
+                    "chat:incoming",
+                ).acquire(15_000)
+            }
+        }
     }
 
     fun clearCall(ctx: Context, callId: String) {
