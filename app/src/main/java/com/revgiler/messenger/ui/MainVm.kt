@@ -29,6 +29,7 @@ import com.revgiler.messenger.data.UsernameTaken
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
 
 sealed interface AuthState {
     data object Loading : AuthState
@@ -275,8 +276,43 @@ class MainVm(app: Application) : AndroidViewModel(app) {
     }
 
     private var lastUpdateCheck = 0L
+    private var lastPeopleRefresh = 0L
+
+    private fun refreshPeople() {
+        val now = System.currentTimeMillis()
+        if (people.isEmpty() || now - lastPeopleRefresh < 120_000L) return
+        lastPeopleRefresh = now
+        viewModelScope.launch {
+            val fresh = Repo.refreshProfiles(people.keys.toList())
+            people = people + fresh.associateBy { it.uid }
+        }
+    }
+
+    private fun saveProfile(fields: Map<String, Any?>) {
+        viewModelScope.launch {
+            runCatching {
+                withTimeout(15_000) { Repo.updateMyProfile(fields) }
+                Repo.myProfile()
+            }.onSuccess { p ->
+                if (p != null && auth is AuthState.Ready) auth = AuthState.Ready(p)
+            }.onFailure { error = "Профиль не сохранён: проверьте интернет" }
+        }
+    }
+
+    fun setStatus(text: String) = saveProfile(mapOf("status" to text.trim().take(70)))
+
+    fun removeAvatar() = saveProfile(mapOf("photo" to null))
+
+    fun setAvatar(uri: android.net.Uri) {
+        viewModelScope.launch {
+            runCatching { com.revgiler.messenger.data.ChatFiles.avatar(getApplication<Application>(), uri) }
+                .onSuccess { saveProfile(mapOf("photo" to it)) }
+                .onFailure { error = "Фото не подошло: ${it.message}" }
+        }
+    }
 
     fun onResume() {
+        refreshPeople()
         if (System.currentTimeMillis() - lastUpdateCheck > 30 * 60_000L) checkUpdate(silent = true)
         (screen as? Screen.Conversation)?.let {
             App.visibleChatId = it.chatId

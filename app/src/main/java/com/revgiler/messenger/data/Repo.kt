@@ -20,6 +20,7 @@ data class Profile(
     val username: String,
     val name: String,
     val photo: String?,
+    val status: String = "",
 )
 
 data class Chat(
@@ -106,6 +107,21 @@ object Repo {
         return doc.toProfile()?.also { profiles[uid] = it }
     }
 
+    /** Изменить поля своего профиля (фото, статус). */
+    suspend fun updateMyProfile(fields: Map<String, Any?>) {
+        val me = uid ?: error("Не выполнен вход")
+        db.collection("users").document(me)
+            .set(fields + ("updatedAt" to FieldValue.serverTimestamp()), SetOptions.merge())
+            .await()
+        profiles.remove(me)
+    }
+
+    /** Свежие профили собеседников: могли сменить фото или статус. */
+    suspend fun refreshProfiles(uids: List<String>): List<Profile> = uids.mapNotNull { id ->
+        runCatching { db.collection("users").document(id).get().await().toProfile() }.getOrNull()
+            ?.also { profiles[id] = it }
+    }
+
     fun cachedProfile(uid: String): Profile? = profiles[uid]
 
     /**
@@ -121,7 +137,8 @@ object Repo {
             val taken = tr.get(nameRef)
             if (taken.exists() && taken.getString("uid") != me) throw UsernameTaken()
             val userRef = db.collection("users").document(me)
-            val old = tr.get(userRef).getString("username")
+            val current = tr.get(userRef)
+            val old = current.getString("username")
             if (old != null && old != name) tr.delete(db.collection("usernames").document(old))
             if (!taken.exists()) tr.set(nameRef, mapOf("uid" to me))
             tr.set(
@@ -129,7 +146,8 @@ object Repo {
                 mapOf(
                     "username" to name,
                     "name" to displayName.trim().ifBlank { name },
-                    "photo" to user?.photoUrl?.toString(),
+                    // своё фото и его удаление не сбрасываем при смене имени
+                    "photo" to if (current.contains("photo")) current.getString("photo") else user?.photoUrl?.toString(),
                     "updatedAt" to FieldValue.serverTimestamp(),
                 ),
                 SetOptions.merge(),
@@ -153,7 +171,7 @@ object Repo {
 
     private fun DocumentSnapshot.toProfile(): Profile? {
         val username = getString("username") ?: return null
-        return Profile(id, username, getString("name") ?: username, getString("photo"))
+        return Profile(id, username, getString("name") ?: username, getString("photo"), getString("status").orEmpty())
     }
 
     // ---------------------------------------------------------------- чаты

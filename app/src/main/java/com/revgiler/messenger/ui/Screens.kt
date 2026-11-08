@@ -1,5 +1,15 @@
 package com.revgiler.messenger.ui
 
+import android.util.Base64
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.filled.EmojiEmotions
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import android.content.Context
 import android.content.Intent
 import android.widget.Toast
@@ -228,7 +238,14 @@ private fun ChatsScreen(vm: MainVm, me: Profile) {
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize()) {
             Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp, top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("Чаты", color = C.Text, fontSize = 28.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                Box(Modifier.clip(CircleShape).clickable { vm.open(Screen.Settings) }) { Avatar(me, 40.dp) }
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text("Чаты", color = C.Text, fontSize = 28.sp, fontWeight = FontWeight.Bold)
+                    if (me.status.isNotBlank()) {
+                        Text(me.status, color = C.TextDim, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                }
                 IconButton(onClick = { vm.open(Screen.Settings) }) { Icon(Icons.Filled.Settings, "Настройки", tint = C.TextDim) }
             }
             vm.update?.let {
@@ -299,8 +316,14 @@ private fun Avatar(p: Profile?, size: Dp) {
             (p?.name ?: "?").take(1).uppercase(),
             color = C.Text, fontWeight = FontWeight.Bold, fontSize = (size.value * 0.4f).sp,
         )
-        if (p?.photo != null) {
-            AsyncImage(p.photo, null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+        val photo = p?.photo
+        val model: Any? = remember(photo) {
+            if (photo != null && photo.startsWith("data:")) {
+                runCatching { Base64.decode(photo.substringAfter(','), Base64.DEFAULT) }.getOrNull()
+            } else photo
+        }
+        if (model != null) {
+            AsyncImage(model, null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
         }
     }
 }
@@ -341,6 +364,7 @@ private fun NewChatScreen(vm: MainVm) {
                 Column(Modifier.weight(1f)) {
                     Text(p.name, color = C.Text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
                     Text("@${p.username}", color = C.TextDim, fontSize = 14.sp)
+                    if (p.status.isNotBlank()) Text(p.status, color = C.TextDim, fontSize = 13.sp, maxLines = 2)
                 }
                 Text("Написать", color = C.Accent, fontWeight = FontWeight.SemiBold)
             }
@@ -365,6 +389,9 @@ private fun ConversationScreen(vm: MainVm, chatId: String, other: Profile) {
     val micPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) recording = recorder.start()
     }
+    var emojiOpen by remember { mutableStateOf(false) }
+    val focusManager = LocalFocusManager.current
+    val keyboard = LocalSoftwareKeyboardController.current
     val pickFile = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) vm.sendFile(chatId, uri)
     }
@@ -406,7 +433,7 @@ private fun ConversationScreen(vm: MainVm, chatId: String, other: Profile) {
             Spacer(Modifier.width(10.dp))
             Column(Modifier.weight(1f)) {
                 Text(other.name, color = C.Text, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text("@${other.username}", color = C.TextDim, fontSize = 13.sp, maxLines = 1)
+                Text(other.status.ifBlank { "@${other.username}" }, color = C.TextDim, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             IconButton(onClick = { call(false) }) { Icon(Icons.Filled.Call, "Звонок", tint = C.Text) }
             IconButton(onClick = { call(true) }) { Icon(Icons.Filled.Videocam, "Видеозвонок", tint = C.Text) }
@@ -464,11 +491,20 @@ private fun ConversationScreen(vm: MainVm, chatId: String, other: Profile) {
                 OutlinedTextField(
                     value = text, onValueChange = { text = it.take(4000) },
                     placeholder = { Text("Сообщение") },
+                    leadingIcon = {
+                        IconButton(onClick = {
+                            emojiOpen = !emojiOpen
+                            if (emojiOpen) {
+                                focusManager.clearFocus()
+                                keyboard?.hide()
+                            }
+                        }) { Icon(Icons.Filled.EmojiEmotions, "Эмодзи", tint = if (emojiOpen) C.Accent else C.TextDim) }
+                    },
                     maxLines = 5,
                     keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
                     shape = RoundedCornerShape(22.dp),
                     colors = fieldColors(),
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.weight(1f).onFocusChanged { if (it.isFocused) emojiOpen = false },
                 )
                 Spacer(Modifier.width(6.dp))
                 if (text.isBlank()) {
@@ -487,8 +523,29 @@ private fun ConversationScreen(vm: MainVm, chatId: String, other: Profile) {
                 }
             }
         }
+        if (emojiOpen && !recording) {
+            BackHandler { emojiOpen = false }
+            LazyVerticalGrid(
+                columns = GridCells.Adaptive(46.dp),
+                modifier = Modifier.fillMaxWidth().height(260.dp).background(C.Surface),
+            ) {
+                items(EMOJI.size) { i ->
+                    Box(Modifier.size(46.dp).clickable { text = (text + EMOJI[i]).take(4000) }, Alignment.Center) {
+                        Text(EMOJI[i], fontSize = 26.sp)
+                    }
+                }
+            }
+        }
     }
 }
+
+private val EMOJI = (
+    "😀 😃 😄 😁 😆 😅 😂 🤣 😊 😇 🙂 🙃 😉 😌 😍 🥰 😘 😗 😙 😚 😋 😛 😝 😜 🤪 🤨 🧐 🤓 😎 🤩 🥳 😏 😒 😞 😔 😟 😕 🙁 " +
+        "😣 😖 😫 😩 🥺 😢 😭 😤 😠 😡 🤬 🤯 😳 🥵 🥶 😱 😨 😰 😥 😓 🤗 🤔 🤭 🤫 🤥 😶 😐 😑 😬 🙄 😯 😦 😧 😮 😲 🥱 😴 🤤 " +
+        "😪 😵 🤐 🥴 🤢 🤮 🤧 😷 🤒 🤕 🤑 🤠 😈 👻 💀 👽 🤖 💩 👍 👎 👌 ✌️ 🤞 🤟 🤘 🤙 👈 👉 👆 👇 ☝️ ✋ 🤚 🖐️ 🖖 👋 👏 🙌 " +
+        "🤝 🙏 💪 ❤️ 🧡 💛 💚 💙 💜 🖤 🤍 🤎 💔 💕 💞 💓 💗 💖 💘 💝 💯 🔥 ✨ ⭐ 🌟 🎉 🎊 🎁 🎂 ☀️ 🌙 🌧️ ⚡ ❄️ 🌹 🌸 🍀 ☕ " +
+        "🍵 🍺 🍷 🍕 🍔 🍰 🍎 🍉 ⚽ 🏆 🚗 ✈️ 🏠 📱 💻 📷 🎵 🎶 💰 💡 ✅ ❌ ❓ ❗"
+    ).split(" ")
 
 @Composable
 private fun Bubble(m: Message, chatId: String) {
@@ -647,19 +704,47 @@ private fun SettingsScreen(vm: MainVm, me: Profile) {
         }
         return
     }
-    Column(Modifier.fillMaxSize().padding(16.dp)) {
+    val pickAvatar = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        if (uri != null) vm.setAvatar(uri)
+    }
+    var status by remember(me.status) { mutableStateOf(me.status) }
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = { vm.back() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = C.Text) }
             Text("Настройки", color = C.Text, fontSize = 22.sp, fontWeight = FontWeight.Bold)
         }
         Spacer(Modifier.height(20.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Avatar(me, 64.dp)
+            Box(
+                Modifier.clip(CircleShape).clickable {
+                    pickAvatar.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                },
+            ) { Avatar(me, 64.dp) }
             Spacer(Modifier.width(14.dp))
             Column(Modifier.weight(1f)) {
                 Text(me.name, color = C.Text, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
                 Text("@${me.username}", color = C.TextDim, fontSize = 15.sp)
             }
+        }
+        Spacer(Modifier.height(12.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = {
+                pickAvatar.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+            }) { Text("Изменить фото") }
+            if (me.photo != null) OutlinedButton(onClick = { vm.removeAvatar() }) { Text("Убрать фото", color = C.Bad) }
+        }
+        Spacer(Modifier.height(12.dp))
+        OutlinedTextField(
+            value = status, onValueChange = { status = it.take(70) },
+            label = { Text("Статус") },
+            placeholder = { Text("Например: на работе") },
+            singleLine = true,
+            colors = fieldColors(),
+            modifier = Modifier.fillMaxWidth(),
+        )
+        if (status.trim() != me.status) {
+            Spacer(Modifier.height(8.dp))
+            OutlinedButton(onClick = { vm.setStatus(status) }, modifier = Modifier.fillMaxWidth()) { Text("Сохранить статус") }
         }
         Spacer(Modifier.height(20.dp))
         OutlinedButton(onClick = { editing = true }, modifier = Modifier.fillMaxWidth()) { Text("Изменить имя или @username") }
@@ -673,7 +758,7 @@ private fun SettingsScreen(vm: MainVm, me: Profile) {
         vm.updateStatus?.let { Text(it, color = C.TextDim, modifier = Modifier.padding(top = 6.dp)) }
         Spacer(Modifier.height(10.dp))
         OutlinedButton(onClick = { vm.signOut() }, modifier = Modifier.fillMaxWidth()) { Text("Выйти", color = C.Bad) }
-        Spacer(Modifier.weight(1f))
+        Spacer(Modifier.height(24.dp))
         Text("Версия ${App.instance.versionName()}", color = C.TextDim, fontSize = 13.sp)
     }
 }

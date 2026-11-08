@@ -7,6 +7,7 @@ import android.graphics.Matrix
 import android.media.ExifInterface
 import android.net.Uri
 import android.provider.OpenableColumns
+import android.util.Base64
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
@@ -14,6 +15,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
 import okio.BufferedSink
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.IOException
 import java.util.UUID
@@ -23,6 +25,7 @@ import java.util.concurrent.TimeUnit
 object ChatFiles {
     const val MAX_BYTES = 50L * 1024 * 1024
     private const val MAX_SIDE = 1600
+    private const val AVATAR_SIDE = 256
 
     class Prepared(val file: File, val name: String, val mime: String, val image: Boolean)
 
@@ -76,16 +79,7 @@ object ChatFiles {
         val decoded = cr.openInputStream(uri)?.use {
             BitmapFactory.decodeStream(it, null, BitmapFactory.Options().apply { inSampleSize = sample })
         } ?: return false
-        val rotation = runCatching {
-            cr.openInputStream(uri)?.use {
-                when (ExifInterface(it).getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)) {
-                    ExifInterface.ORIENTATION_ROTATE_90 -> 90f
-                    ExifInterface.ORIENTATION_ROTATE_180 -> 180f
-                    ExifInterface.ORIENTATION_ROTATE_270 -> 270f
-                    else -> 0f
-                }
-            }
-        }.getOrNull() ?: 0f
+        val rotation = exifRotation(ctx, uri)
         val scale = minOf(1f, MAX_SIDE.toFloat() / maxOf(decoded.width, decoded.height))
         val matrix = Matrix().apply {
             postScale(scale, scale)
@@ -93,6 +87,42 @@ object ChatFiles {
         }
         val bitmap = Bitmap.createBitmap(decoded, 0, 0, decoded.width, decoded.height, matrix, true)
         return out.outputStream().use { bitmap.compress(Bitmap.CompressFormat.JPEG, 80, it) }
+    }
+
+    private fun exifRotation(ctx: Context, uri: Uri): Float = runCatching {
+        ctx.contentResolver.openInputStream(uri)?.use {
+            when (ExifInterface(it).getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)) {
+                ExifInterface.ORIENTATION_ROTATE_90 -> 90f
+                ExifInterface.ORIENTATION_ROTATE_180 -> 180f
+                ExifInterface.ORIENTATION_ROTATE_270 -> 270f
+                else -> 0f
+            }
+        }
+    }.getOrNull() ?: 0f
+
+    /** Аватар: квадрат 256×256, JPEG. Лежит прямо в профиле, отдельного файла не нужно. */
+    suspend fun avatar(ctx: Context, uri: Uri): String = withContext(Dispatchers.IO) {
+        val cr = ctx.contentResolver
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        cr.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) throw IOException("Это не изображение")
+        var sample = 1
+        while (minOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= AVATAR_SIDE) sample *= 2
+        val decoded = cr.openInputStream(uri)?.use {
+            BitmapFactory.decodeStream(it, null, BitmapFactory.Options().apply { inSampleSize = sample })
+        } ?: throw IOException("Не удалось открыть фото")
+        val side = minOf(decoded.width, decoded.height)
+        val scale = AVATAR_SIDE.toFloat() / side
+        val matrix = Matrix().apply {
+            postScale(scale, scale)
+            postRotate(exifRotation(ctx, uri))
+        }
+        val square = Bitmap.createBitmap(decoded, (decoded.width - side) / 2, (decoded.height - side) / 2, side, side, matrix, true)
+        val bytes = ByteArrayOutputStream().use {
+            square.compress(Bitmap.CompressFormat.JPEG, 75, it)
+            it.toByteArray()
+        }
+        "data:image/jpeg;base64," + Base64.encodeToString(bytes, Base64.NO_WRAP)
     }
 
     suspend fun upload(chatId: String, fileId: String, p: Prepared, progress: (Float) -> Unit) = withContext(Dispatchers.IO) {
