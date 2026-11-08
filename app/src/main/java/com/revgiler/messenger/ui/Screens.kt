@@ -1,5 +1,7 @@
 package com.revgiler.messenger.ui
 
+import androidx.compose.foundation.border
+import androidx.compose.foundation.horizontalScroll
 import android.util.Base64
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -573,16 +575,16 @@ private fun Bubble(m: Message, chatId: String) {
                     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.width(220.dp)) {
                         IconButton(
                             onClick = { if (id != null) VoicePlayer.toggle(ctx, chatId, id) },
-                            modifier = Modifier.size(40.dp).background(Color.White.copy(alpha = 0.15f), CircleShape),
+                            modifier = Modifier.size(40.dp).background(C.Text.copy(alpha = 0.15f), CircleShape),
                         ) {
-                            if (VoicePlayer.loadingId == id) CircularProgressIndicator(Modifier.size(18.dp), color = Color.White, strokeWidth = 2.dp)
-                            else Icon(if (isCurrent && VoicePlayer.playing) Icons.Filled.Pause else Icons.Filled.PlayArrow, null, tint = Color.White)
+                            if (VoicePlayer.loadingId == id) CircularProgressIndicator(Modifier.size(18.dp), color = C.Text, strokeWidth = 2.dp)
+                            else Icon(if (isCurrent && VoicePlayer.playing) Icons.Filled.Pause else Icons.Filled.PlayArrow, null, tint = C.Text)
                         }
                         Spacer(Modifier.width(10.dp))
                         Column(Modifier.weight(1f)) {
                             LinearProgressIndicator(
                                 progress = { if (isCurrent) VoicePlayer.progress else 0f },
-                                color = Color.White, trackColor = Color.White.copy(alpha = 0.25f),
+                                color = C.Text, trackColor = C.Text.copy(alpha = 0.25f),
                                 modifier = Modifier.fillMaxWidth().height(3.dp),
                             )
                             Spacer(Modifier.height(4.dp))
@@ -638,7 +640,7 @@ private fun ImageAttachment(m: Message, chatId: String) {
                 model = file, contentDescription = "Фото", contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize().clickable { openFile(ctx, file, m.mime) },
             )
-            state == null -> CircularProgressIndicator(Modifier.size(28.dp), color = Color.White, strokeWidth = 2.dp)
+            state == null -> CircularProgressIndicator(Modifier.size(28.dp), color = C.Text, strokeWidth = 2.dp)
             else -> Text("Фото недоступно", color = C.Text.copy(alpha = 0.7f), fontSize = 14.sp)
         }
     }
@@ -662,9 +664,9 @@ private fun FileAttachment(m: Message, chatId: String) {
             }
         },
     ) {
-        Box(Modifier.size(40.dp).background(Color.White.copy(alpha = 0.15f), CircleShape), Alignment.Center) {
-            if (loading) CircularProgressIndicator(Modifier.size(18.dp), color = Color.White, strokeWidth = 2.dp)
-            else Icon(Icons.Filled.InsertDriveFile, null, tint = Color.White)
+        Box(Modifier.size(40.dp).background(C.Text.copy(alpha = 0.15f), CircleShape), Alignment.Center) {
+            if (loading) CircularProgressIndicator(Modifier.size(18.dp), color = C.Text, strokeWidth = 2.dp)
+            else Icon(Icons.Filled.InsertDriveFile, null, tint = C.Text)
         }
         Spacer(Modifier.width(10.dp))
         Column(Modifier.weight(1f)) {
@@ -745,6 +747,27 @@ private fun SettingsScreen(vm: MainVm, me: Profile) {
         if (status.trim() != me.status) {
             Spacer(Modifier.height(8.dp))
             OutlinedButton(onClick = { vm.setStatus(status) }, modifier = Modifier.fillMaxWidth()) { Text("Сохранить статус") }
+        }
+        Spacer(Modifier.height(20.dp))
+        Text("Оформление", color = C.Text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(10.dp))
+        val themeCtx = LocalContext.current
+        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+            Palettes.forEach { p ->
+                val selected = C.palette.id == p.id
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.clip(RoundedCornerShape(10.dp)).clickable { C.choose(themeCtx, p) }.padding(4.dp),
+                ) {
+                    Box(
+                        Modifier.size(46.dp)
+                            .border(if (selected) 3.dp else 1.dp, if (selected) C.Text else C.TextDim.copy(alpha = 0.4f), CircleShape)
+                            .padding(5.dp).background(p.bg, CircleShape).padding(8.dp).background(p.accent, CircleShape),
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(p.title, color = if (selected) C.Text else C.TextDim, fontSize = 12.sp, maxLines = 1)
+                }
+            }
         }
         Spacer(Modifier.height(20.dp))
         OutlinedButton(onClick = { editing = true }, modifier = Modifier.fillMaxWidth()) { Text("Изменить имя или @username") }

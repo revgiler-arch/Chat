@@ -5,6 +5,7 @@ import android.app.Application
 class App : Application() {
     override fun onCreate() {
         super.onCreate()
+        com.revgiler.messenger.ui.C.load(this)
         instance = this
         Notifier.ensureChannels(this)
     }

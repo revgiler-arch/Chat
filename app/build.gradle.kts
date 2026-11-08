@@ -13,8 +13,8 @@ android {
         applicationId = "com.revgiler.messenger"
         minSdk = 26
         targetSdk = 35
-        versionCode = 7
-        versionName = "0.7"
+        versionCode = 8
+        versionName = "0.8"
     }
 
     // Один ключ для всех сборок: его SHA-1 прописан в Firebase, без него не работает вход через Google.

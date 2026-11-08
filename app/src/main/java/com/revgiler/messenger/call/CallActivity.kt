@@ -134,7 +134,7 @@ class CallActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         showOverLockScreen()
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        setContent { AppTheme { CallUi() } }
+        setContent { AppTheme(alwaysDarkBars = true) { CallUi() } }
         begin(intent)
     }
 
