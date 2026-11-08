@@ -10,6 +10,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
 import android.view.WindowManager
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -98,38 +99,61 @@ class CallActivity : ComponentActivity() {
     private var callId = ""
     private var chatId = ""
     private var otherUid = ""
-    private var session: CallSession? = null
+    private var session by mutableStateOf<CallSession?>(null)
+    private var localTrack by mutableStateOf<VideoTrack?>(null)
     private val regs = mutableListOf<ListenerRegistration>()
     private var watchJob: Job? = null
     private var timeoutJob: Job? = null
+    private var closeJob: Job? = null
+    private val earlyCandidates = mutableListOf<Candidate>()
+    private var callDocReady = false
     private var proximity: PowerManager.WakeLock? = null
     private var logged = false
     private var pendingAccept: (() -> Unit)? = null
 
-    private val permissions = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { res ->
-        if (res[Manifest.permission.RECORD_AUDIO] == true) {
-            pendingAccept?.invoke()
-        } else {
-            endWith("Нет доступа к микрофону")
-        }
+    private val permissions = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { _ ->
+        // В ответе есть только то, что спрашивали сейчас, поэтому смотрим фактическое состояние.
+        // Без камеры звонок всё равно идёт (только звук), без микрофона — нет.
+        val then = pendingAccept
         pendingAccept = null
+        if (hasPermission(Manifest.permission.RECORD_AUDIO)) {
+            then?.invoke()
+        } else {
+            endWith("Нет доступа к микрофону. Разрешите его в настройках приложения")
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         showOverLockScreen()
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        setContent { AppTheme { CallUi() } }
+        begin(intent)
+    }
 
+    /** Запуск звонка по интенту: и при создании экрана, и когда экран ещё не успел закрыться. */
+    private fun begin(intent: Intent) {
+        closeJob?.cancel()
+        closeJob = null
+        muted = false
+        connectedAt = 0L
+        logged = false
+        callId = ""
+        chatId = ""
+        otherUid = ""
+        synchronized(earlyCandidates) {
+            earlyCandidates.clear()
+            callDocReady = false
+        }
         incoming = intent.getBooleanExtra(EXTRA_INCOMING, false)
         video = intent.getBooleanExtra(EXTRA_VIDEO, false)
         title = intent.getStringExtra(EXTRA_TITLE).orEmpty()
         speaker = video
         cameraOn = video
 
-        setContent { AppTheme { CallUi() } }
-
         if (incoming) {
             callId = intent.getStringExtra(EXTRA_CALL_ID).orEmpty()
+            callDocReady = true // документ звонка уже создан звонящим
             App.activeCallId = callId
             Notifier.clearCall(this, callId)
             phase = Phase.Ringing
@@ -150,6 +174,12 @@ class CallActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        setIntent(intent)
+        // прошлый звонок завершён, а экран ещё закрывается — начинаем новый здесь же
+        if (phase == Phase.Ended) {
+            begin(intent)
+            return
+        }
         // нажали «Ответить» / «Отклонить» в уведомлении, когда экран уже открыт
         if (intent.getStringExtra(EXTRA_CALL_ID) == callId) {
             when (intent.getStringExtra(EXTRA_ACTION)) {
@@ -168,10 +198,12 @@ class CallActivity : ComponentActivity() {
                 App.activeCallId = callId
                 val s = newSession()
                 s.start(Push.iceServers())
+                localTrack = s.localVideo
                 s.createOffer { offer ->
                     lifecycleScope.launch {
                         runCatching {
                             CallSignal.create(callId, otherUid, chatId, video, offer)
+                            flushEarlyCandidates()
                             regs += CallSignal.candidates(callId, CallSignal.CALLEE) { session?.addRemoteCandidate(it) }
                             Push.notify(chatId, "call", callId, video)
                             status = "Вызываю…"
@@ -201,6 +233,7 @@ class CallActivity : ComponentActivity() {
         withPermissions {
             phase = Phase.Connecting
             status = "Соединяю…"
+            startConnectTimeout()
             lifecycleScope.launch {
                 try {
                     val doc = CallSignal.get(callId) ?: return@launch endWith("Звонок уже завершён")
@@ -209,6 +242,7 @@ class CallActivity : ComponentActivity() {
                     otherUid = doc.from
                     val s = newSession()
                     s.start(Push.iceServers())
+                    localTrack = s.localVideo
                     regs += CallSignal.candidates(callId, CallSignal.CALLER) { session?.addRemoteCandidate(it) }
                     s.acceptOffer(doc.offerSdp ?: return@launch endWith("Пустой звонок")) { answer ->
                         lifecycleScope.launch {
@@ -233,7 +267,18 @@ class CallActivity : ComponentActivity() {
     private fun newSession(): CallSession {
         val s = CallSession(this, video, object : CallSession.Listener {
             override fun onLocalCandidate(c: Candidate) {
-                CallSignal.addCandidate(callId, if (incoming) CallSignal.CALLEE else CallSignal.CALLER, c)
+                // Правила базы примут кандидата только когда документ звонка уже создан
+                val ready = synchronized(earlyCandidates) {
+                    if (!callDocReady) earlyCandidates += c
+                    callDocReady
+                }
+                if (ready) sendCandidate(c)
+            }
+            override fun onCameraProblem(message: String) {
+                runOnUiThread {
+                    cameraOn = false
+                    Toast.makeText(this@CallActivity, message, Toast.LENGTH_LONG).show()
+                }
             }
             override fun onRemoteVideo(track: VideoTrack) {
                 runOnUiThread { remoteTrack = track }
@@ -264,6 +309,27 @@ class CallActivity : ComponentActivity() {
         return s
     }
 
+    private fun sendCandidate(c: Candidate) {
+        CallSignal.addCandidate(callId, if (incoming) CallSignal.CALLEE else CallSignal.CALLER, c)
+    }
+
+    private fun flushEarlyCandidates() {
+        val early = synchronized(earlyCandidates) {
+            callDocReady = true
+            earlyCandidates.toList().also { earlyCandidates.clear() }
+        }
+        early.forEach { sendCandidate(it) }
+    }
+
+    /** Если за это время связь не установилась, не висим на «Соединяю…» бесконечно. */
+    private fun startConnectTimeout() {
+        timeoutJob?.cancel()
+        timeoutJob = lifecycleScope.launch {
+            delay(35_000)
+            if (phase == Phase.Connecting) hangUp("Не удалось соединиться: сеть не пропускает звонок")
+        }
+    }
+
     private fun watchCall() {
         watchJob?.cancel()
         watchJob = lifecycleScope.launch {
@@ -272,6 +338,7 @@ class CallActivity : ComponentActivity() {
                 if (!incoming && doc.status == "accepted" && phase == Phase.Calling) {
                     phase = Phase.Connecting
                     status = "Соединяю…"
+                    startConnectTimeout()
                 }
                 when (doc.status) {
                     "declined" -> { if (!incoming) log(missed = true); endWith("Отклонён") }
@@ -307,7 +374,7 @@ class CallActivity : ComponentActivity() {
         status = text
         timeoutJob?.cancel()
         release()
-        lifecycleScope.launch {
+        closeJob = lifecycleScope.launch {
             delay(1500)
             finish()
         }
@@ -317,9 +384,10 @@ class CallActivity : ComponentActivity() {
         watchJob?.cancel()
         regs.forEach { it.remove() }
         regs.clear()
+        localTrack = null
+        remoteTrack = null
         session?.dispose()
         session = null
-        remoteTrack = null
         restoreAudio()
         runCatching { proximity?.release() }
         if (App.activeCallId == callId) App.activeCallId = null
@@ -337,11 +405,14 @@ class CallActivity : ComponentActivity() {
         if (phase == Phase.Ended) super.onBackPressed() else moveTaskToBack(true)
     }
 
+    private fun hasPermission(name: String) =
+        ContextCompat.checkSelfPermission(this, name) == PackageManager.PERMISSION_GRANTED
+
     private fun withPermissions(then: () -> Unit) {
         val need = buildList {
             add(Manifest.permission.RECORD_AUDIO)
             if (video) add(Manifest.permission.CAMERA)
-        }.filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
+        }.filterNot { hasPermission(it) }
         if (need.isEmpty()) then() else {
             pendingAccept = then
             permissions.launch(need.toTypedArray())
@@ -408,6 +479,7 @@ class CallActivity : ComponentActivity() {
         Box(Modifier.fillMaxSize().background(Color(0xFF101318))) {
             val s = session
             val remote = remoteTrack
+            val local = localTrack
             if (video && remote != null && s != null && phase == Phase.Connected) {
                 VideoView(s, remote, mirror = false, modifier = Modifier.fillMaxSize())
             }
@@ -459,10 +531,10 @@ class CallActivity : ComponentActivity() {
                 Spacer(Modifier.height(24.dp))
             }
             // своё видео — маленьким окошком в углу
-            if (video && s != null && s.localVideo != null && cameraOn && phase != Phase.Ended && phase != Phase.Ringing) {
+            if (video && s != null && local != null && cameraOn && phase != Phase.Ended && phase != Phase.Ringing) {
                 Box(Modifier.safeDrawingPadding().padding(16.dp).align(Alignment.TopEnd)) {
                     VideoView(
-                        s, s.localVideo!!, mirror = s.isFrontCamera, overlay = true,
+                        s, local, mirror = s.isFrontCamera, overlay = true,
                         modifier = Modifier.size(width = 110.dp, height = 160.dp).clip(RoundedCornerShape(14.dp)),
                     )
                 }

@@ -1,6 +1,8 @@
 package com.revgiler.messenger.call
 
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
 import com.revgiler.messenger.data.Candidate
 import com.revgiler.messenger.data.IceServerInfo
 import org.webrtc.AudioSource
@@ -38,6 +40,8 @@ class CallSession(
         fun onRemoteVideo(track: VideoTrack)
         fun onState(state: PeerConnection.PeerConnectionState)
         fun onError(message: String)
+        /** Камера не включилась; звонок продолжается со звуком. */
+        fun onCameraProblem(message: String)
     }
 
     val egl: EglBase = EglBase.create()
@@ -53,6 +57,17 @@ class CallSession(
     private var frontCamera = true
     private val pendingRemote = mutableListOf<IceCandidate>()
     private var remoteSet = false
+    private var answerApplied = false
+    private val cameraEvents = object : CameraVideoCapturer.CameraEventsHandler {
+        override fun onCameraError(errorDescription: String?) {
+            listener.onCameraProblem("Не удалось включить камеру")
+        }
+        override fun onCameraDisconnected() {}
+        override fun onCameraFreezed(errorDescription: String?) {}
+        override fun onCameraOpening(cameraName: String?) {}
+        override fun onFirstFrameAvailable() {}
+        override fun onCameraClosed() {}
+    }
 
     init {
         initOnce(ctx)
@@ -85,11 +100,20 @@ class CallSession(
     }
 
     private fun startCamera() {
+        if (ctx.checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            listener.onCameraProblem("Нет доступа к камере: звонок только со звуком")
+            return
+        }
+        runCatching { openCamera() }.onFailure { listener.onCameraProblem("Не удалось включить камеру") }
+    }
+
+    private fun openCamera() {
         val enumerator = Camera2Enumerator(ctx)
         val names = enumerator.deviceNames
-        val name = names.firstOrNull { enumerator.isFrontFacing(it) } ?: names.firstOrNull() ?: return
+        val name = names.firstOrNull { enumerator.isFrontFacing(it) } ?: names.firstOrNull()
+            ?: error("На устройстве нет камеры")
         frontCamera = enumerator.isFrontFacing(name)
-        val cap = enumerator.createCapturer(name, null) ?: return
+        val cap = enumerator.createCapturer(name, cameraEvents) ?: error("Камера недоступна")
         val helper = SurfaceTextureHelper.create("camera", egl.eglBaseContext)
         val source = factory.createVideoSource(false)
         cap.initialize(helper, ctx, source.capturerObserver)
@@ -121,7 +145,8 @@ class CallSession(
 
     fun setAnswer(answerSdp: String) {
         val p = pc ?: return
-        if (remoteSet) return
+        if (answerApplied) return // документ звонка обновляется несколько раз
+        answerApplied = true
         p.setRemoteDescription(sdp(onSet = { markRemoteSet() }), SessionDescription(SessionDescription.Type.ANSWER, answerSdp))
     }
 
