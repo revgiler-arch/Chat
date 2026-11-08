@@ -274,7 +274,10 @@ class MainVm(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    private var lastUpdateCheck = 0L
+
     fun onResume() {
+        if (System.currentTimeMillis() - lastUpdateCheck > 30 * 60_000L) checkUpdate(silent = true)
         (screen as? Screen.Conversation)?.let {
             App.visibleChatId = it.chatId
             Notifier.clearChat(getApplication(), it.chatId)
@@ -352,6 +355,7 @@ class MainVm(app: Application) : AndroidViewModel(app) {
     // ---------------------------------------------------------------- обновления
 
     fun checkUpdate(silent: Boolean) {
+        lastUpdateCheck = System.currentTimeMillis()
         viewModelScope.launch {
             if (!silent) updateStatus = "Проверяю…"
             runCatching { Updater.check(getApplication<Application>()) }

@@ -8,6 +8,7 @@ import android.provider.Settings
 import androidx.core.content.FileProvider
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -25,6 +26,8 @@ object Updater {
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
         .build()
+
+    private val RETRY_DELAYS_MS = longArrayOf(0, 2_000, 5_000, 10_000)
 
     fun currentVersion(ctx: Context): Long = runCatching {
         val info = ctx.packageManager.getPackageInfo(ctx.packageName, 0)
@@ -51,11 +54,25 @@ object Updater {
 
     /** Скачать APK; [progress] — от 0 до 1. */
     suspend fun download(ctx: Context, info: UpdateInfo, progress: (Float) -> Unit): File = withContext(Dispatchers.IO) {
+        var failure: java.io.IOException? = null
+        for (wait in RETRY_DELAYS_MS) {
+            delay(wait)
+            try {
+                return@withContext fetch(ctx, info, progress)
+            } catch (e: java.io.IOException) {
+                failure = e // обрыв связи или сбой GitHub (5xx) — пробуем ещё раз
+            }
+        }
+        throw failure ?: java.io.IOException("Не удалось скачать")
+    }
+
+    private fun fetch(ctx: Context, info: UpdateInfo, progress: (Float) -> Unit): File {
         val dir = File(ctx.cacheDir, "updates").apply { mkdirs() }
         dir.listFiles()?.forEach { it.delete() }
         val out = File(dir, "Messenger-${info.versionCode}.apk")
         val req = Request.Builder().url(info.apkUrl).header("User-Agent", UA).build()
         http.newCall(req).execute().use { r ->
+            if (r.code in 400..499 && r.code != 429) throw IllegalStateException("Не удалось скачать: HTTP ${r.code}")
             if (!r.isSuccessful) throw java.io.IOException("Не удалось скачать: HTTP ${r.code}")
             val body = r.body ?: throw java.io.IOException("Пустой ответ")
             val total = body.contentLength().takeIf { it > 0 } ?: 25_000_000L
@@ -73,7 +90,7 @@ object Updater {
                 }
             }
         }
-        out
+        return out
     }
 
     /** Можно ли приложению ставить APK (Android 8+ спрашивает разрешение один раз). */
