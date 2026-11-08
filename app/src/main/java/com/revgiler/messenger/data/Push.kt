@@ -52,6 +52,13 @@ object Push {
     private suspend fun idToken(): String? =
         FirebaseAuth.getInstance().currentUser?.getIdToken(false)?.await()?.token
 
+    /** Адрес сервера и токен входа для запросов к нему. */
+    suspend fun endpoint(): Pair<String, String>? = withContext(Dispatchers.IO) {
+        val base = serverUrl() ?: return@withContext null
+        val token = idToken() ?: return@withContext null
+        base to token
+    }
+
     /** Разбудить телефон собеседника. Ошибки молча игнорируем: сообщение всё равно уже в базе. */
     fun notify(chatId: String, kind: String = "message", callId: String = "", video: Boolean = false) {
         scope.launch {

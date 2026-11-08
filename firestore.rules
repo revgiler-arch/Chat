@@ -40,7 +40,7 @@ service cloud.firestore {
           && request.resource.data.from == me()
           && request.resource.data.text is string
           && request.resource.data.text.size() <= 4000
-          && request.resource.data.get('type', 'text') in ['text', 'voice', 'call'];
+          && request.resource.data.get('type', 'text') in ['text', 'voice', 'call', 'image', 'file'];
       }
 
       // Голосовые сообщения: звук хранится прямо в документе (до ~1 МБ)

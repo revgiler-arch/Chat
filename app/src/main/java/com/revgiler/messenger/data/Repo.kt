@@ -42,6 +42,9 @@ data class Message(
     val type: String = "text",
     val mediaId: String? = null,
     val durationMs: Long = 0,
+    val fileId: String? = null,
+    val fileSize: Long = 0,
+    val mime: String? = null,
 )
 
 class UsernameTaken : Exception("Это имя уже занято")
@@ -211,6 +214,9 @@ object Repo {
                         type = d.getString("type") ?: "text",
                         mediaId = d.getString("mediaId"),
                         durationMs = d.getLong("duration") ?: 0L,
+                        fileId = d.getString("fileId"),
+                        fileSize = d.getLong("size") ?: 0L,
+                        mime = d.getString("mime"),
                         // пока сервер не поставил время — берём оценку, чтобы сообщение сразу встало на место
                         at = d.getTimestamp("at", DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)?.toDate()?.time
                             ?: System.currentTimeMillis(),
@@ -268,6 +274,32 @@ object Repo {
                 chatRef,
                 mapOf(
                     "lastText" to "🎤 Голосовое сообщение",
+                    "lastFrom" to me,
+                    "lastAt" to FieldValue.serverTimestamp(),
+                    "read" to mapOf(me to FieldValue.serverTimestamp()),
+                ),
+                SetOptions.merge(),
+            )
+            .commit()
+            .addOnSuccessListener { Push.notify(chatId) }
+    }
+
+    /** Запись о файле, который уже загружен в хранилище. В text — имя файла. */
+    fun sendFile(chatId: String, fileId: String, name: String, mime: String, size: Long, image: Boolean) {
+        val me = uid ?: return
+        val chatRef = db.collection("chats").document(chatId)
+        db.batch()
+            .set(
+                chatRef.collection("messages").document(),
+                mapOf(
+                    "from" to me, "text" to name.take(300), "type" to if (image) "image" else "file",
+                    "fileId" to fileId, "mime" to mime, "size" to size, "at" to FieldValue.serverTimestamp(),
+                ),
+            )
+            .set(
+                chatRef,
+                mapOf(
+                    "lastText" to if (image) "📷 Фото" else "📎 ${name.take(150)}",
                     "lastFrom" to me,
                     "lastAt" to FieldValue.serverTimestamp(),
                     "read" to mapOf(me to FieldValue.serverTimestamp()),

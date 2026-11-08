@@ -54,6 +54,9 @@ class MainVm(app: Application) : AndroidViewModel(app) {
         private set
     var error by mutableStateOf<String?>(null)
 
+    /** Ход загрузки файла, 0..1; null — ничего не загружается. */
+    var uploadProgress by mutableStateOf<Float?>(null)
+
     val stack = mutableStateListOf<Screen>(Screen.Chats)
     val screen get() = stack.last()
 
@@ -319,6 +322,32 @@ class MainVm(app: Application) : AndroidViewModel(app) {
     fun send(chatId: String, text: String) = Repo.send(chatId, text)
 
     fun sendVoice(chatId: String, audio: ByteArray, durationMs: Long) = Repo.sendVoice(chatId, audio, durationMs)
+
+    fun sendFile(chatId: String, uri: android.net.Uri) {
+        if (uploadProgress != null) return
+        uploadProgress = 0f
+        val ctx = getApplication<Application>()
+        viewModelScope.launch {
+            try {
+                val prepared = com.revgiler.messenger.data.ChatFiles.prepare(ctx, uri)
+                val fileId = com.revgiler.messenger.data.ChatFiles.newId()
+                try {
+                    com.revgiler.messenger.data.ChatFiles.upload(chatId, fileId, prepared) { p ->
+                        viewModelScope.launch { uploadProgress = p }
+                    }
+                    val size = prepared.file.length()
+                    Repo.sendFile(chatId, fileId, prepared.name, prepared.mime, size, prepared.image)
+                    com.revgiler.messenger.data.ChatFiles.keepLocal(ctx, fileId, prepared.name, prepared.file)
+                } finally {
+                    prepared.file.delete()
+                }
+            } catch (e: Exception) {
+                error = "Файл не отправлен: ${e.message}"
+            } finally {
+                uploadProgress = null
+            }
+        }
+    }
 
     // ---------------------------------------------------------------- обновления
 

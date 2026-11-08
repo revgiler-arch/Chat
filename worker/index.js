@@ -24,6 +24,14 @@ export default {
         return json({ error: String(e.message || e) }, e.status || 500);
       }
     }
+    const fileRoute = url.pathname.match(/^\/files\/([A-Za-z0-9_-]{10,200})\/([A-Za-z0-9_-]{10,64})$/);
+    if (fileRoute && (request.method === "GET" || request.method === "PUT")) {
+      try {
+        return await handleFile(request, env, fileRoute[1], fileRoute[2]);
+      } catch (e) {
+        return json({ error: String(e.message || e) }, e.status || 500);
+      }
+    }
     if (request.method !== "POST" || url.pathname !== "/notify") {
       return json({ error: "not found" }, 404);
     }
@@ -83,6 +91,39 @@ export default {
     }
   },
 };
+
+// ------------------------------------------------------------ файлы (Cloudflare R2)
+
+const MAX_FILE_BYTES = 50 * 1024 * 1024;
+
+// Читать и загружать файлы чата могут только его участники.
+async function handleFile(request, env, chatId, fileId) {
+  const idToken = (request.headers.get("Authorization") || "").replace(/^Bearer\s+/i, "");
+  const me = await verifyIdToken(idToken, env.PROJECT_ID);
+  const token = await accessToken(JSON.parse(env.SERVICE_ACCOUNT));
+  const chat = await firestore(env.PROJECT_ID, token).get(`chats/${chatId}`);
+  if (!arr(chat, "members").includes(me)) return json({ error: "not a member" }, 403);
+  const key = `${chatId}/${fileId}`;
+
+  if (request.method === "GET") {
+    const obj = await env.FILES.get(key);
+    if (!obj) return json({ error: "not found" }, 404);
+    return new Response(obj.body, {
+      headers: {
+        "Content-Type": "application/octet-stream",
+        "Content-Length": String(obj.size),
+        "X-Content-Type-Options": "nosniff",
+      },
+    });
+  }
+
+  const length = Number(request.headers.get("Content-Length") || 0);
+  if (!length) return json({ error: "length required" }, 411);
+  if (length > MAX_FILE_BYTES) return json({ error: "too large" }, 413);
+  if (await env.FILES.head(key)) return json({ error: "exists" }, 409);
+  await env.FILES.put(key, request.body, { customMetadata: { from: me } });
+  return json({ ok: true });
+}
 
 // ------------------------------------------------------------ TURN (ретранслятор для звонков)
 

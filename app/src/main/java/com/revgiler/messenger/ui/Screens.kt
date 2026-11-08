@@ -1,5 +1,16 @@
 package com.revgiler.messenger.ui
 
+import android.content.Context
+import android.content.Intent
+import android.widget.Toast
+import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material.icons.filled.InsertDriveFile
+import androidx.compose.runtime.produceState
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.core.content.FileProvider
+import com.revgiler.messenger.data.ChatFiles
+import java.io.File
+import kotlinx.coroutines.launch
 import android.Manifest
 import android.app.Activity
 import android.content.pm.PackageManager
@@ -354,6 +365,9 @@ private fun ConversationScreen(vm: MainVm, chatId: String, other: Profile) {
     val micPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) recording = recorder.start()
     }
+    val pickFile = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) vm.sendFile(chatId, uri)
+    }
     fun startRecording() {
         if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
             VoicePlayer.stop()
@@ -424,6 +438,9 @@ private fun ConversationScreen(vm: MainVm, chatId: String, other: Profile) {
                 }
             }
         }
+        vm.uploadProgress?.let { p ->
+            LinearProgressIndicator(progress = { p }, color = C.Accent, modifier = Modifier.fillMaxWidth())
+        }
         Row(
             Modifier.fillMaxWidth().background(C.Surface).padding(8.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -440,6 +457,10 @@ private fun ConversationScreen(vm: MainVm, chatId: String, other: Profile) {
                     modifier = Modifier.size(48.dp).background(C.Accent, CircleShape),
                 ) { Icon(Icons.AutoMirrored.Filled.Send, "Отправить", tint = Color.White) }
             } else {
+                IconButton(
+                    onClick = { pickFile.launch(arrayOf("*/*")) },
+                    enabled = vm.uploadProgress == null,
+                ) { Icon(Icons.Filled.AttachFile, "Прикрепить файл", tint = C.TextDim) }
                 OutlinedTextField(
                     value = text, onValueChange = { text = it.take(4000) },
                     placeholder = { Text("Сообщение") },
@@ -520,6 +541,8 @@ private fun Bubble(m: Message, chatId: String) {
                         color = C.Text, fontSize = 15.sp,
                     )
                 }
+                "image" -> ImageAttachment(m, chatId)
+                "file" -> FileAttachment(m, chatId)
                 else -> Text(m.text, color = C.Text, fontSize = 16.sp)
             }
             Row(Modifier.align(Alignment.End), verticalAlignment = Alignment.CenterVertically) {
@@ -531,6 +554,72 @@ private fun Bubble(m: Message, chatId: String) {
             }
         }
     }
+}
+
+private fun openFile(ctx: Context, file: File, mime: String?) {
+    runCatching {
+        val uri = FileProvider.getUriForFile(ctx, "${ctx.packageName}.files", file)
+        ctx.startActivity(
+            Intent(Intent.ACTION_VIEW)
+                .setDataAndType(uri, mime ?: "*/*")
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK),
+        )
+    }.onFailure { Toast.makeText(ctx, "Нет приложения, чтобы открыть этот файл", Toast.LENGTH_LONG).show() }
+}
+
+@Composable
+private fun ImageAttachment(m: Message, chatId: String) {
+    val ctx = LocalContext.current
+    val id = m.fileId
+    val state by produceState<Result<File>?>(null, id) {
+        value = if (id == null) Result.failure(IllegalStateException()) else runCatching { ChatFiles.download(ctx, chatId, id, m.text) }
+    }
+    val file = state?.getOrNull()
+    Box(Modifier.size(240.dp).clip(RoundedCornerShape(12.dp)), Alignment.Center) {
+        when {
+            file != null -> AsyncImage(
+                model = file, contentDescription = "Фото", contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize().clickable { openFile(ctx, file, m.mime) },
+            )
+            state == null -> CircularProgressIndicator(Modifier.size(28.dp), color = Color.White, strokeWidth = 2.dp)
+            else -> Text("Фото недоступно", color = C.Text.copy(alpha = 0.7f), fontSize = 14.sp)
+        }
+    }
+}
+
+@Composable
+private fun FileAttachment(m: Message, chatId: String) {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var loading by remember { mutableStateOf(false) }
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.width(240.dp).clickable(enabled = !loading && m.fileId != null) {
+            val id = m.fileId ?: return@clickable
+            loading = true
+            scope.launch {
+                runCatching { ChatFiles.download(ctx, chatId, id, m.text) }
+                    .onSuccess { openFile(ctx, it, m.mime) }
+                    .onFailure { Toast.makeText(ctx, it.message ?: "Не удалось скачать", Toast.LENGTH_LONG).show() }
+                loading = false
+            }
+        },
+    ) {
+        Box(Modifier.size(40.dp).background(Color.White.copy(alpha = 0.15f), CircleShape), Alignment.Center) {
+            if (loading) CircularProgressIndicator(Modifier.size(18.dp), color = Color.White, strokeWidth = 2.dp)
+            else Icon(Icons.Filled.InsertDriveFile, null, tint = Color.White)
+        }
+        Spacer(Modifier.width(10.dp))
+        Column(Modifier.weight(1f)) {
+            Text(m.text, color = C.Text, fontSize = 15.sp, maxLines = 2)
+            Text(fileSize(m.fileSize), color = C.Text.copy(alpha = 0.75f), fontSize = 12.sp)
+        }
+    }
+}
+
+private fun fileSize(bytes: Long): String = when {
+    bytes >= 1024 * 1024 -> String.format(Locale.getDefault(), "%.1f МБ", bytes / 1048576f)
+    else -> "${(bytes / 1024).coerceAtLeast(1)} КБ"
 }
 
 @Composable

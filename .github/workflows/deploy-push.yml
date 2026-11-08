@@ -36,6 +36,11 @@ jobs:
           [ -z "$SA" ] && missing="$missing FIREBASE_SERVICE_ACCOUNT"
           if [ -n "$missing" ]; then echo "::error::Нет секретов:$missing"; exit 1; fi
           echo "$SA" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d.get('private_key') and d.get('client_email'); print('service account ok:', d['client_email'])"
+      - name: Prepare file storage
+        run: |
+          npx --yes wrangler@3 r2 bucket create chat-files || echo "Bucket already exists"
+          npx --yes wrangler@3 r2 bucket lifecycle list chat-files | grep -q expire-90d \
+            || npx --yes wrangler@3 r2 bucket lifecycle add chat-files expire-90d --expire-days 90 --force
       - name: Deploy
         run: |
           npx --yes wrangler@3 deploy 2>&1 | tee /tmp/deploy.txt
