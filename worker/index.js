@@ -240,4 +240,4 @@ function b64urlDecodeText(s) {
   return new TextDecoder().decode(b64urlDecode(s));
 }
 
-// Выкладка: workflow «Deploy push server» (.github/workflows/deploy-push.yml).
+// Выкладка: workflow «Deploy push server» (.github/workflows/deploy-push.yml)
