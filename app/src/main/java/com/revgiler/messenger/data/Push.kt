@@ -13,6 +13,7 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.IOException
 import java.util.concurrent.TimeUnit
 
 /**
@@ -72,6 +73,20 @@ object Push {
                     Request.Builder().url("$base/notify").post(body).header("Authorization", "Bearer $token").build(),
                 ).execute().close()
             }
+        }
+    }
+
+    /** Один шаг удаления аккаунта на сервере. true — все данные стёрты. */
+    suspend fun deleteAccountStep(idToken: String): Boolean = withContext(Dispatchers.IO) {
+        val base = serverUrl() ?: throw IOException("Сервер недоступен, проверьте интернет")
+        val slow = http.newBuilder().readTimeout(60, TimeUnit.SECONDS).build()
+        val empty = "{}".toRequestBody("application/json".toMediaType())
+        slow.newCall(
+            Request.Builder().url("$base/account/delete").post(empty).header("Authorization", "Bearer $idToken").build(),
+        ).execute().use { r ->
+            val json = JSONObject(r.body?.string().orEmpty().ifBlank { "{}" })
+            if (!r.isSuccessful) throw IOException(json.optString("error").ifBlank { "ошибка сервера ${r.code}" })
+            json.optBoolean("done")
         }
     }
 

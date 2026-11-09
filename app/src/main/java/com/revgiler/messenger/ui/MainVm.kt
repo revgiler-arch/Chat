@@ -26,7 +26,9 @@ import com.revgiler.messenger.data.Repo
 import com.revgiler.messenger.data.UpdateInfo
 import com.revgiler.messenger.data.Updater
 import com.revgiler.messenger.data.UsernameTaken
+import com.google.firebase.auth.FirebaseAuthException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
@@ -46,6 +48,9 @@ sealed interface Screen {
     /** Обои: chatId == null — общие для всех чатов. */
     data class Wallpaper(val chatId: String?) : Screen
 }
+
+private const val TYPING_SEND_MS = 4_000L
+private const val TYPING_SHOW_MS = 6_000L
 
 class MainVm(app: Application) : AndroidViewModel(app) {
 
@@ -78,6 +83,17 @@ class MainVm(app: Application) : AndroidViewModel(app) {
         private set
     var searchStatus by mutableStateOf<String?>(null)
         private set
+
+    /** Чаты, где собеседник сейчас печатает. */
+    var typingChats by mutableStateOf<Set<String>>(emptySet())
+        private set
+    private val seenTyping = HashMap<String, Long>()
+    private val typingJobs = HashMap<String, Job>()
+    private var lastTypingSent = 0L
+
+    /** Приложение на экране: только тогда сообщения считаются прочитанными. */
+    private var resumed = false
+    private val readMarked = HashMap<String, String>()
 
     var update by mutableStateOf<UpdateInfo?>(null)
         private set
@@ -121,17 +137,8 @@ class MainVm(app: Application) : AndroidViewModel(app) {
         error = null
         viewModelScope.launch {
             try {
-                val option = GetSignInWithGoogleOption.Builder(activity.getString(R.string.default_web_client_id)).build()
-                val request = GetCredentialRequest.Builder().addCredentialOption(option).build()
-                val result = CredentialManager.create(activity).getCredential(activity, request)
-                val cred = result.credential
-                if (cred is CustomCredential && cred.type == GoogleIdTokenCredential.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
-                    val token = GoogleIdTokenCredential.createFrom(cred.data).idToken
-                    Repo.signInWithGoogle(token)
-                    refreshAuth()
-                } else {
-                    error = "Google вернул неожиданный ответ"
-                }
+                Repo.signInWithGoogle(googleIdToken(activity))
+                refreshAuth()
             } catch (e: GetCredentialCancellationException) {
                 // пользователь закрыл окно — ничего не делаем
             } catch (e: Exception) {
@@ -140,6 +147,17 @@ class MainVm(app: Application) : AndroidViewModel(app) {
                 busy = false
             }
         }
+    }
+
+    /** Окно выбора Google-аккаунта; возвращает токен для Firebase. */
+    private suspend fun googleIdToken(activity: Activity): String {
+        val option = GetSignInWithGoogleOption.Builder(activity.getString(R.string.default_web_client_id)).build()
+        val request = GetCredentialRequest.Builder().addCredentialOption(option).build()
+        val cred = CredentialManager.create(activity).getCredential(activity, request).credential
+        if (cred is CustomCredential && cred.type == GoogleIdTokenCredential.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
+            return GoogleIdTokenCredential.createFrom(cred.data).idToken
+        }
+        throw IllegalStateException("Google вернул неожиданный ответ")
     }
 
     fun claimUsername(username: String, name: String) {
@@ -164,10 +182,59 @@ class MainVm(app: Application) : AndroidViewModel(app) {
     }
 
     fun signOut() {
+        stopListeners()
+        viewModelScope.launch { Repo.signOut() }
+        resetToSignedOut()
+    }
+
+    /** Удалить аккаунт и все его данные: сначала подтверждение через Google. */
+    fun deleteAccount(activity: Activity) {
+        if (busy) return
+        busy = true
+        error = null
+        viewModelScope.launch {
+            try {
+                Repo.reauthenticate(googleIdToken(activity))
+                stopListeners()
+                Repo.deleteAccount()
+                val ctx = getApplication<Application>()
+                runCatching {
+                    ctx.cacheDir.deleteRecursively()
+                    java.io.File(ctx.filesDir, "voice").deleteRecursively()
+                }
+                resetToSignedOut()
+            } catch (e: GetCredentialCancellationException) {
+                // передумал на окне выбора аккаунта
+            } catch (e: FirebaseAuthException) {
+                error = if (e.errorCode == "ERROR_USER_MISMATCH") "Выберите тот же Google-аккаунт, с которым вошли" else "Не удалось подтвердить вход: ${e.message}"
+                restartListeners()
+            } catch (e: Exception) {
+                error = "Аккаунт не удалён: ${e.message}. Попробуйте ещё раз"
+                restartListeners()
+            } finally {
+                busy = false
+            }
+        }
+    }
+
+    private fun stopListeners() {
         chatsJob?.cancel()
         messagesJob?.cancel()
         callsJob?.cancel()
-        viewModelScope.launch { Repo.signOut() }
+    }
+
+    private fun restartListeners() {
+        if (Repo.uid == null || auth !is AuthState.Ready) return
+        startChats()
+        startIncomingCalls()
+    }
+
+    private fun resetToSignedOut() {
+        typingJobs.values.forEach { it.cancel() }
+        typingJobs.clear()
+        seenTyping.clear()
+        typingChats = emptySet()
+        readMarked.clear()
         chats = emptyList()
         people = emptyMap()
         stack.clear()
@@ -214,9 +281,51 @@ class MainVm(app: Application) : AndroidViewModel(app) {
                 .collect { list ->
                     chats = list
                     loadPeople(list.map { it.otherUid })
+                    updateTyping(list)
+                    // чат обновился на этом телефоне — значит, сообщение дошло
+                    list.filter { !it.lastFromMe && it.lastAt > it.myDeliveredAt }
+                        .forEach { Repo.markDelivered(it.id, it.lastAt) }
                 }
         }
     }
+
+    private fun updateTyping(list: List<Chat>) {
+        val now = System.currentTimeMillis()
+        list.forEach { c ->
+            val previous = seenTyping.put(c.id, c.otherTypingAt)
+            when {
+                // сообщение пришло — значит, уже не печатает
+                !c.lastFromMe && c.lastAt >= c.otherTypingAt -> stopTyping(c.id)
+                // первый снимок после запуска содержит старые отметки — их не показываем
+                previous != null && c.otherTypingAt > previous && kotlin.math.abs(now - c.otherTypingAt) < 60_000 -> startTyping(c.id)
+            }
+        }
+    }
+
+    private fun startTyping(chatId: String) {
+        typingChats = typingChats + chatId
+        typingJobs.remove(chatId)?.cancel()
+        typingJobs[chatId] = viewModelScope.launch {
+            delay(TYPING_SHOW_MS)
+            typingChats = typingChats - chatId
+        }
+    }
+
+    private fun stopTyping(chatId: String) {
+        typingJobs.remove(chatId)?.cancel()
+        if (chatId in typingChats) typingChats = typingChats - chatId
+    }
+
+    /** Вызывается при вводе текста. В базу пишем не чаще раза в 4 секунды и только при наличии сети. */
+    fun onTyping(chatId: String) {
+        val now = System.currentTimeMillis()
+        if (now - lastTypingSent < TYPING_SEND_MS || !online()) return
+        lastTypingSent = now
+        Repo.setTyping(chatId)
+    }
+
+    private fun online(): Boolean =
+        getApplication<Application>().getSystemService(android.net.ConnectivityManager::class.java)?.activeNetwork != null
 
     private fun loadPeople(uids: List<String>) {
         val missing = uids.filter { it !in people }
@@ -311,12 +420,26 @@ class MainVm(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun onPause() {
+        resumed = false
+        App.visibleChatId = null
+    }
+
+    /** Отметить чат прочитанным, если он реально на экране и есть новое входящее. */
+    private fun markReadIfVisible(chatId: String) {
+        if (!resumed || (screen as? Screen.Conversation)?.chatId != chatId) return
+        val last = messages.lastOrNull { !it.fromMe } ?: return
+        if (readMarked.put(chatId, last.id) != last.id) Repo.markRead(chatId)
+    }
+
     fun onResume() {
+        resumed = true
         refreshPeople()
         if (System.currentTimeMillis() - lastUpdateCheck > 30 * 60_000L) checkUpdate(silent = true)
         (screen as? Screen.Conversation)?.let {
             App.visibleChatId = it.chatId
             Notifier.clearChat(getApplication(), it.chatId)
+            markReadIfVisible(it.chatId)
         }
     }
 
@@ -353,12 +476,25 @@ class MainVm(app: Application) : AndroidViewModel(app) {
                 .catch { error = "Сообщения не загрузились: ${it.message}" }
                 .collect {
                     messages = it
-                    Repo.markRead(chatId)
+                    markReadIfVisible(chatId)
                 }
         }
     }
 
-    fun send(chatId: String, text: String) = Repo.send(chatId, text)
+    fun send(chatId: String, text: String) {
+        lastTypingSent = 0
+        Repo.send(chatId, text)
+    }
+
+    /** Жалоба на собеседника; к ней прикладываем его последние сообщения. */
+    fun report(chatId: String, other: Profile, reason: String, comment: String, onDone: () -> Unit) {
+        val evidence = messages.filter { !it.fromMe }
+        viewModelScope.launch {
+            runCatching { withTimeout(15_000) { Repo.report(chatId, other.uid, reason, comment, evidence) } }
+                .onSuccess { onDone() }
+                .onFailure { error = "Жалоба не отправлена: проверьте интернет" }
+        }
+    }
 
     fun sendVoice(chatId: String, audio: ByteArray, durationMs: Long) = Repo.sendVoice(chatId, audio, durationMs)
 

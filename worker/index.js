@@ -24,6 +24,13 @@ export default {
         return json({ error: String(e.message || e) }, e.status || 500);
       }
     }
+    if (request.method === "POST" && url.pathname === "/account/delete") {
+      try {
+        return await handleDeleteAccount(request, env);
+      } catch (e) {
+        return json({ error: String(e.message || e) }, e.status || 500);
+      }
+    }
     const fileRoute = url.pathname.match(/^\/files\/([A-Za-z0-9_-]{10,200})\/([A-Za-z0-9_-]{10,64})$/);
     if (fileRoute && (request.method === "GET" || request.method === "PUT")) {
       try {
@@ -125,6 +132,100 @@ async function handleFile(request, env, chatId, fileId) {
   return json({ ok: true });
 }
 
+// ------------------------------------------------------------ удаление аккаунта
+
+// На бесплатном плане Cloudflare — 50 внешних запросов на вызов, поэтому работаем частями:
+// отвечаем {done:false}, и приложение вызывает снова. Каждый шаг можно безопасно повторить.
+// Сам вход Firebase удаляет приложение последним действием.
+const DELETE_BUDGET = 40;
+const RECENT_LOGIN_SECONDS = 15 * 60;
+
+async function handleDeleteAccount(request, env) {
+  const idToken = (request.headers.get("Authorization") || "").replace(/^Bearer\s+/i, "");
+  const claims = await verifyClaims(idToken, env.PROJECT_ID);
+  if (Math.floor(Date.now() / 1000) - Number(claims.auth_time || 0) > RECENT_LOGIN_SECONDS) {
+    throw httpError(403, "нужно заново подтвердить вход");
+  }
+  const uid = claims.sub;
+  const fs = firestore(env.PROJECT_ID, await accessToken(JSON.parse(env.SERVICE_ACCOUNT)));
+  const budget = { left: DELETE_BUDGET };
+  const done = await deleteUserData(fs, env, uid, budget);
+  return json({ ok: true, done });
+}
+
+async function deleteUserData(fs, env, uid, budget) {
+  // Чаты и всё внутри них (сообщения, голосовые, файлы в R2)
+  while (true) {
+    if (budget.left < 1) return false;
+    budget.left--;
+    const chats = await fs.queryNames("chats", "members", "ARRAY_CONTAINS", uid, 20);
+    if (!chats.length) break;
+    for (const path of chats) {
+      if (!(await deleteChat(fs, env, path, budget))) return false;
+    }
+  }
+  // Служебные документы звонков, где человек был участником
+  for (const field of ["from", "to"]) {
+    while (true) {
+      if (budget.left < 1) return false;
+      budget.left--;
+      const calls = await fs.queryNames("calls", field, "EQUAL", uid, 10);
+      if (!calls.length) break;
+      for (const path of calls) {
+        for (const side of ["callerCandidates", "calleeCandidates"]) {
+          if (!(await deleteCollection(fs, `${path}/${side}`, budget))) return false;
+        }
+        if (budget.left < 1) return false;
+        budget.left--;
+        await fs.deleteDocs([fs.fullName(path)]);
+      }
+    }
+  }
+  // Профиль и имя @username — в конце, чтобы при сбое можно было продолжить
+  if (budget.left < 3) return false;
+  budget.left -= 3;
+  const user = await fs.get(`users/${uid}`);
+  const username = str(user, "username");
+  const writes = [fs.fullName(`users/${uid}`)];
+  if (username) {
+    const owner = await fs.get(`usernames/${username}`);
+    if (str(owner, "uid") === uid) writes.push(fs.fullName(`usernames/${username}`));
+  }
+  await fs.deleteDocs(writes);
+  return true;
+}
+
+async function deleteChat(fs, env, path, budget) {
+  for (const sub of ["messages", "media"]) {
+    if (!(await deleteCollection(fs, `${path}/${sub}`, budget))) return false;
+  }
+  const chatId = path.split("/").pop();
+  while (true) {
+    if (budget.left < 2) return false;
+    budget.left -= 2;
+    const list = await env.FILES.list({ prefix: `${chatId}/`, limit: 1000 });
+    if (!list.objects.length) break;
+    await env.FILES.delete(list.objects.map((o) => o.key));
+    if (!list.truncated) break;
+  }
+  if (budget.left < 1) return false;
+  budget.left--;
+  await fs.deleteDocs([fs.fullName(path)]);
+  return true;
+}
+
+async function deleteCollection(fs, path, budget) {
+  while (true) {
+    if (budget.left < 2) return false;
+    budget.left--;
+    const names = await fs.listNames(path, 300);
+    if (!names.length) return true;
+    budget.left--;
+    await fs.deleteDocs(names);
+    if (names.length < 300) return true;
+  }
+}
+
 // ------------------------------------------------------------ TURN (ретранслятор для звонков)
 
 // Если настроены секреты TURN_KEY_ID и TURN_KEY_API_TOKEN (Cloudflare → Realtime → TURN),
@@ -149,6 +250,10 @@ async function turnServers(env) {
 let jwksCache = { keys: null, until: 0 };
 
 async function verifyIdToken(jwt, projectId) {
+  return (await verifyClaims(jwt, projectId)).sub;
+}
+
+async function verifyClaims(jwt, projectId) {
   const parts = (jwt || "").split(".");
   if (parts.length !== 3) throw httpError(401, "no token");
   const header = JSON.parse(b64urlDecodeText(parts[0]));
@@ -174,7 +279,7 @@ async function verifyIdToken(jwt, projectId) {
     "RSASSA-PKCS1-v1_5", key, b64urlDecode(parts[2]), new TextEncoder().encode(`${parts[0]}.${parts[1]}`),
   );
   if (!ok) throw httpError(401, "bad signature");
-  return payload.sub;
+  return payload;
 }
 
 // ------------------------------------------------------------ токен доступа сервисного аккаунта
@@ -219,6 +324,43 @@ function firestore(projectId, token) {
       if (r.status === 404) return null;
       if (!r.ok) throw new Error(`firestore ${r.status}`);
       return r.json();
+    },
+    fullName(path) {
+      return `projects/${projectId}/databases/(default)/documents/${path}`;
+    },
+    // Только имена документов: содержимое (например, звук голосовых) не скачиваем
+    async listNames(path, pageSize) {
+      const r = await fetch(`${base}/${path}?pageSize=${pageSize}&mask.fieldPaths=from`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (r.status === 404) return [];
+      if (!r.ok) throw new Error(`firestore list ${r.status}`);
+      return ((await r.json()).documents || []).map((d) => d.name);
+    },
+    // Пути документов коллекции по одному условию
+    async queryNames(collectionId, field, op, value, limit) {
+      const r = await fetch(`${base}:runQuery`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          structuredQuery: {
+            from: [{ collectionId }],
+            where: { fieldFilter: { field: { fieldPath: field }, op, value: { stringValue: value } } },
+            select: { fields: [{ fieldPath: "__name__" }] },
+            limit,
+          },
+        }),
+      });
+      if (!r.ok) throw new Error(`firestore query ${r.status}`);
+      return (await r.json()).filter((x) => x.document).map((x) => x.document.name.split("/documents/")[1]);
+    },
+    async deleteDocs(names) {
+      const r = await fetch(`${base}:commit`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ writes: names.map((name) => ({ delete: name })) }),
+      });
+      if (!r.ok) throw new Error(`firestore delete ${r.status}`);
     },
     async removeFromArray(path, field, values) {
       const name = `projects/${projectId}/databases/(default)/documents/${path}`;

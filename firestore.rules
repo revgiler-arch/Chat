@@ -56,6 +56,27 @@ service cloud.firestore {
       }
     }
 
+    // Жалобы: отправить может участник чата, читать — только владелец проекта (консоль Firebase)
+    match /reports/{reportId} {
+      function chatMembers() {
+        return get(/databases/$(database)/documents/chats/$(request.resource.data.chatId)).data.members;
+      }
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['from', 'reported', 'chatId', 'reason', 'comment', 'messages', 'status', 'at'])
+        && request.resource.data.from == me()
+        && request.resource.data.reported != me()
+        && request.resource.data.chatId is string
+        && me() in chatMembers()
+        && request.resource.data.reported in chatMembers()
+        && request.resource.data.reason in ['spam', 'abuse', 'threats', 'adult', 'fraud', 'other']
+        && request.resource.data.comment is string
+        && request.resource.data.comment.size() <= 500
+        && request.resource.data.messages is list
+        && request.resource.data.messages.size() <= 5
+        && request.resource.data.status == 'new'
+        && request.resource.data.at == request.time;
+    }
+
     // Звонки: служебный документ для установки соединения (WebRTC). Доступ — только двум участникам.
     match /calls/{callId} {
       allow read: if signedIn() && (resource.data.from == me() || resource.data.to == me());

@@ -57,6 +57,11 @@ class MainActivity : ComponentActivity() {
         askCallSetup()
     }
 
+    override fun onPause() {
+        super.onPause()
+        vm.onPause()
+    }
+
     /** Разрешения, без которых звонок не разбудит заблокированный телефон. Каждое спрашиваем один раз. */
     private fun askCallSetup() {
         if (callSetupDialog?.isShowing == true) return

@@ -1,6 +1,14 @@
 package com.revgiler.messenger.ui
 
 import androidx.compose.foundation.border
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.material.icons.filled.Done
+import androidx.compose.material.icons.filled.DoneAll
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.RadioButtonDefaults
+import androidx.compose.material3.TextButton
+import com.revgiler.messenger.data.Delivery
 import androidx.compose.foundation.horizontalScroll
 import android.util.Base64
 import androidx.activity.result.PickVisualMediaRequest
@@ -131,7 +139,7 @@ fun MessengerApp(vm: MainVm, activity: Activity) {
                 is AuthState.Ready -> when (val s = vm.screen) {
                     Screen.Chats -> ChatsScreen(vm, a.me)
                     Screen.NewChat -> NewChatScreen(vm)
-                    Screen.Settings -> SettingsScreen(vm, a.me)
+                    Screen.Settings -> SettingsScreen(vm, a.me, activity)
                     is Screen.Conversation -> ConversationScreen(vm, s.chatId, s.other)
                     is Screen.Wallpaper -> WallpaperScreen(s.chatId) { vm.back() }
                 }
@@ -269,7 +277,7 @@ private fun ChatsScreen(vm: MainVm, me: Profile) {
                 }
             } else {
                 LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 90.dp)) {
-                    items(vm.chats, key = { it.id }) { chat -> ChatRow(chat, vm.people[chat.otherUid]) { vm.openChat(chat) } }
+                    items(vm.chats, key = { it.id }) { chat -> ChatRow(chat, vm.people[chat.otherUid], chat.id in vm.typingChats) { vm.openChat(chat) } }
                 }
             }
         }
@@ -283,7 +291,7 @@ private fun ChatsScreen(vm: MainVm, me: Profile) {
 }
 
 @Composable
-private fun ChatRow(chat: Chat, other: Profile?, onClick: () -> Unit) {
+private fun ChatRow(chat: Chat, other: Profile?, typing: Boolean, onClick: () -> Unit) {
     Row(
         Modifier.fillMaxWidth().clickable(enabled = other != null, onClick = onClick).padding(horizontal = 16.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -300,9 +308,13 @@ private fun ChatRow(chat: Chat, other: Profile?, onClick: () -> Unit) {
             }
             Spacer(Modifier.height(2.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
+                if (!typing && chat.lastFromMe && chat.lastAt > 0 && !chat.lastText.startsWith("📞")) {
+                    Ticks(chat.statusOf(chat.lastAt), 16.dp, C.TextDim)
+                    Spacer(Modifier.width(3.dp))
+                }
                 Text(
-                    (if (chat.lastFromMe) "Вы: " else "") + chat.lastText.ifBlank { "Нет сообщений" },
-                    color = C.TextDim, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    if (typing) "печатает…" else (if (chat.lastFromMe) "Вы: " else "") + chat.lastText.ifBlank { "Нет сообщений" },
+                    color = if (typing) C.Accent else C.TextDim, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),
                 )
                 if (chat.unread) Box(Modifier.padding(start = 8.dp).size(10.dp).background(C.Accent, CircleShape))
@@ -385,6 +397,9 @@ private fun ConversationScreen(vm: MainVm, chatId: String, other: Profile) {
     // обои перечитываем при каждом возвращении на экран (могли поменять в настройках)
     val wallpaper = remember(chatId, vm.stack.size) { Wallpapers.get(ctx, chatId) }
     var menu by remember { mutableStateOf(false) }
+    var reporting by remember { mutableStateOf(false) }
+    val chat = vm.chats.firstOrNull { it.id == chatId }
+    val typing = chatId in vm.typingChats
     val recorder = remember { VoiceRecorder(ctx) }
     var recording by remember { mutableStateOf(false) }
     var recordMs by remember { mutableLongStateOf(0L) }
@@ -435,7 +450,10 @@ private fun ConversationScreen(vm: MainVm, chatId: String, other: Profile) {
             Spacer(Modifier.width(10.dp))
             Column(Modifier.weight(1f)) {
                 Text(other.name, color = C.Text, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(other.status.ifBlank { "@${other.username}" }, color = C.TextDim, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(
+                    if (typing) "печатает…" else other.status.ifBlank { "@${other.username}" },
+                    color = if (typing) C.Accent else C.TextDim, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                )
             }
             IconButton(onClick = { call(false) }) { Icon(Icons.Filled.Call, "Звонок", tint = C.Text) }
             IconButton(onClick = { call(true) }) { Icon(Icons.Filled.Videocam, "Видеозвонок", tint = C.Text) }
@@ -445,6 +463,10 @@ private fun ConversationScreen(vm: MainVm, chatId: String, other: Profile) {
                     DropdownMenuItem(text = { Text("Обои чата") }, onClick = {
                         menu = false
                         vm.open(Screen.Wallpaper(chatId))
+                    })
+                    DropdownMenuItem(text = { Text("Пожаловаться", color = C.Bad) }, onClick = {
+                        menu = false
+                        reporting = true
                     })
                 }
             }
@@ -462,7 +484,7 @@ private fun ConversationScreen(vm: MainVm, chatId: String, other: Profile) {
                     val prev = msgs.getOrNull(i - 1)
                     Column(Modifier.fillMaxWidth()) {
                         if (prev == null || !sameDay(prev.at, m.at)) DayLabel(m.at)
-                        Bubble(m, chatId)
+                        Bubble(m, chatId, if (m.fromMe && m.type != "call" && !m.pending) chat?.statusOf(m.at) ?: Delivery.SENT else null)
                     }
                 }
             }
@@ -491,7 +513,11 @@ private fun ConversationScreen(vm: MainVm, chatId: String, other: Profile) {
                     enabled = vm.uploadProgress == null,
                 ) { Icon(Icons.Filled.AttachFile, "Прикрепить файл", tint = C.TextDim) }
                 OutlinedTextField(
-                    value = text, onValueChange = { text = it.take(4000) },
+                    value = text,
+                    onValueChange = {
+                        if (it != text && it.isNotBlank()) vm.onTyping(chatId)
+                        text = it.take(4000)
+                    },
                     placeholder = { Text("Сообщение") },
                     leadingIcon = {
                         IconButton(onClick = {
@@ -532,14 +558,97 @@ private fun ConversationScreen(vm: MainVm, chatId: String, other: Profile) {
                 modifier = Modifier.fillMaxWidth().height(260.dp).background(C.Surface),
             ) {
                 items(EMOJI.size) { i ->
-                    Box(Modifier.size(46.dp).clickable { text = (text + EMOJI[i]).take(4000) }, Alignment.Center) {
+                    Box(Modifier.size(46.dp).clickable { text = (text + EMOJI[i]).take(4000); vm.onTyping(chatId) }, Alignment.Center) {
                         Text(EMOJI[i], fontSize = 26.sp)
                     }
                 }
             }
         }
     }
+    if (reporting) {
+        ReportDialog(
+            name = other.name,
+            onDismiss = { reporting = false },
+            onSend = { reason, comment ->
+                reporting = false
+                vm.report(chatId, other, reason, comment) {
+                    Toast.makeText(ctx, "Жалоба отправлена", Toast.LENGTH_LONG).show()
+                }
+            },
+        )
+    }
 }
+
+private val REPORT_REASONS = listOf(
+    "spam" to "Спам",
+    "abuse" to "Оскорбления или травля",
+    "threats" to "Угрозы",
+    "adult" to "Непристойные материалы",
+    "fraud" to "Мошенничество",
+    "other" to "Другое",
+)
+
+@Composable
+private fun ReportDialog(name: String, onDismiss: () -> Unit, onSend: (String, String) -> Unit) {
+    var reason by remember { mutableStateOf<String?>(null) }
+    var comment by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = C.Surface,
+        title = { Text("Пожаловаться: $name", color = C.Text) },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                Text(
+                    "Собеседник об этом не узнает. К жалобе приложим его последние 5 сообщений.",
+                    color = C.TextDim, fontSize = 14.sp,
+                )
+                Spacer(Modifier.height(8.dp))
+                REPORT_REASONS.forEach { (id, title) ->
+                    Row(
+                        Modifier.fillMaxWidth().selectable(selected = reason == id, onClick = { reason = id }),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RadioButton(
+                            selected = reason == id, onClick = null,
+                            colors = RadioButtonDefaults.colors(selectedColor = C.Accent, unselectedColor = C.TextDim),
+                            modifier = Modifier.padding(10.dp),
+                        )
+                        Text(title, color = C.Text, fontSize = 15.sp)
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = comment, onValueChange = { comment = it.take(500) },
+                    label = { Text("Комментарий (необязательно)") },
+                    maxLines = 4, colors = fieldColors(), modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { reason?.let { onSend(it, comment) } }, enabled = reason != null) {
+                Text("Отправить", color = if (reason != null) C.Bad else C.TextDim)
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Отмена", color = C.Text) } },
+    )
+}
+
+/** Галочки: одна — отправлено, две серые — доставлено, две синие — прочитано. */
+@Composable
+private fun Ticks(status: Delivery, size: Dp, tint: Color) {
+    Icon(
+        if (status == Delivery.SENT) Icons.Filled.Done else Icons.Filled.DoneAll,
+        when (status) {
+            Delivery.SENT -> "Отправлено"
+            Delivery.DELIVERED -> "Доставлено"
+            Delivery.READ -> "Прочитано"
+        },
+        tint = if (status == Delivery.READ) ReadBlue else tint,
+        modifier = Modifier.size(size),
+    )
+}
+
+private val ReadBlue = Color(0xFF34B7F1)
 
 private val EMOJI = (
     "😀 😃 😄 😁 😆 😅 😂 🤣 😊 😇 🙂 🙃 😉 😌 😍 🥰 😘 😗 😙 😚 😋 😛 😝 😜 🤪 🤨 🧐 🤓 😎 🤩 🥳 😏 😒 😞 😔 😟 😕 🙁 " +
@@ -550,7 +659,7 @@ private val EMOJI = (
     ).split(" ")
 
 @Composable
-private fun Bubble(m: Message, chatId: String) {
+private fun Bubble(m: Message, chatId: String, delivery: Delivery?) {
     val ctx = LocalContext.current
     Row(
         Modifier.fillMaxWidth(),
@@ -609,6 +718,10 @@ private fun Bubble(m: Message, chatId: String) {
                 if (m.pending) {
                     Spacer(Modifier.width(4.dp))
                     Icon(Icons.Filled.Schedule, "Отправляется", tint = C.Text.copy(alpha = 0.6f), modifier = Modifier.size(12.dp))
+                }
+                if (delivery != null) {
+                    Spacer(Modifier.width(4.dp))
+                    Ticks(delivery, 15.dp, C.Text.copy(alpha = 0.6f))
                 }
             }
         }
@@ -694,8 +807,9 @@ private fun DayLabel(at: Long) {
 // ---------------------------------------------------------------- настройки
 
 @Composable
-private fun SettingsScreen(vm: MainVm, me: Profile) {
+private fun SettingsScreen(vm: MainVm, me: Profile, activity: Activity) {
     var editing by remember { mutableStateOf(false) }
+    var confirmDelete by remember { mutableStateOf(false) }
     if (editing) {
         BackHandler { editing = false }
         Box(Modifier.fillMaxSize()) {
@@ -781,8 +895,34 @@ private fun SettingsScreen(vm: MainVm, me: Profile) {
         vm.updateStatus?.let { Text(it, color = C.TextDim, modifier = Modifier.padding(top = 6.dp)) }
         Spacer(Modifier.height(10.dp))
         OutlinedButton(onClick = { vm.signOut() }, modifier = Modifier.fillMaxWidth()) { Text("Выйти", color = C.Bad) }
+        Spacer(Modifier.height(10.dp))
+        OutlinedButton(onClick = { confirmDelete = true }, enabled = !vm.busy, modifier = Modifier.fillMaxWidth()) {
+            if (vm.busy) CircularProgressIndicator(Modifier.size(18.dp), color = C.Bad, strokeWidth = 2.dp)
+            else Text("Удалить аккаунт", color = C.Bad)
+        }
         Spacer(Modifier.height(24.dp))
         Text("Версия ${App.instance.versionName()}", color = C.TextDim, fontSize = 13.sp)
+    }
+    if (confirmDelete) {
+        AlertDialog(
+            onDismissRequest = { confirmDelete = false },
+            containerColor = C.Surface,
+            title = { Text("Удалить аккаунт?", color = C.Text) },
+            text = {
+                Text(
+                    "Профиль, @${me.username} и все ваши переписки с файлами будут удалены навсегда, " +
+                        "в том числе у собеседников. Отменить это нельзя. Для подтверждения нужно будет выбрать ваш Google-аккаунт.",
+                    color = C.TextDim,
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmDelete = false
+                    vm.deleteAccount(activity)
+                }) { Text("Удалить навсегда", color = C.Bad) }
+            },
+            dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Отмена", color = C.Text) } },
+        )
     }
 }
 

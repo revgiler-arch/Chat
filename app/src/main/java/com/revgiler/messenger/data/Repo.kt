@@ -30,7 +30,20 @@ data class Chat(
     val lastAt: Long,
     val lastFromMe: Boolean,
     val unread: Boolean,
-)
+    val otherDeliveredAt: Long = 0,
+    val otherReadAt: Long = 0,
+    val otherTypingAt: Long = 0,
+    val myDeliveredAt: Long = 0,
+) {
+    /** Галочки для моего сообщения, отправленного в момент [at]. */
+    fun statusOf(at: Long): Delivery = when {
+        at <= otherReadAt -> Delivery.READ
+        at <= otherDeliveredAt -> Delivery.DELIVERED
+        else -> Delivery.SENT
+    }
+}
+
+enum class Delivery { SENT, DELIVERED, READ }
 
 data class Message(
     val id: String,
@@ -59,6 +72,9 @@ object Repo {
 
     private val profiles = ConcurrentHashMap<String, Profile>()
 
+    /** Для какого последнего сообщения чата уже отметили доставку (чтобы не писать в базу повторно). */
+    private val deliveredMarked = ConcurrentHashMap<String, Long>()
+
     // ---------------------------------------------------------------- вход
 
     suspend fun signInWithGoogle(idToken: String) {
@@ -68,7 +84,36 @@ object Repo {
     suspend fun signOut() {
         runCatching { unregisterPush() }
         profiles.clear()
+        deliveredMarked.clear()
         auth.signOut()
+    }
+
+    /** Подтвердить личность перед необратимым действием. Войти нужно в тот же Google-аккаунт. */
+    suspend fun reauthenticate(idToken: String) {
+        val user = auth.currentUser ?: error("Не выполнен вход")
+        user.reauthenticate(GoogleAuthProvider.getCredential(idToken, null)).await()
+    }
+
+    /**
+     * Полное удаление аккаунта. Данные стирает сервер (частями, пока не ответит done),
+     * сам вход Firebase удаляем последним: при сбое можно просто повторить.
+     */
+    suspend fun deleteAccount() {
+        val user = auth.currentUser ?: error("Не выполнен вход")
+        val token = user.getIdToken(true).await().token ?: error("Нет токена входа")
+        var steps = 0
+        while (!Push.deleteAccountStep(token)) {
+            if (++steps > 1000) error("Удаление не завершилось, попробуйте ещё раз")
+        }
+        runCatching { FirebaseMessaging.getInstance().deleteToken().await() }
+        user.delete().await()
+        profiles.clear()
+        deliveredMarked.clear()
+        // убрать переписку из кэша на телефоне; getInstance() после этого создаст новый экземпляр
+        runCatching {
+            db.terminate().await()
+            db.clearPersistence().await()
+        }
     }
 
     // ---------------------------------------------------------------- push-токены
@@ -201,6 +246,8 @@ object Repo {
                     val lastAt = d.getTimestamp("lastAt")?.toDate()?.time ?: 0L
                     val readAt = d.getTimestamp("read.$me")?.toDate()?.time ?: 0L
                     val lastFrom = d.getString("lastFrom")
+                    fun stamp(field: String) =
+                        d.getTimestamp("$field", DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)?.toDate()?.time ?: 0L
                     Chat(
                         id = d.id,
                         otherUid = other,
@@ -208,6 +255,10 @@ object Repo {
                         lastAt = lastAt,
                         lastFromMe = lastFrom == me,
                         unread = lastFrom != null && lastFrom != me && readAt < lastAt,
+                        otherDeliveredAt = stamp("delivered.$other"),
+                        otherReadAt = stamp("read.$other"),
+                        otherTypingAt = stamp("typing.$other"),
+                        myDeliveredAt = stamp("delivered.$me"),
                     )
                 }.sortedByDescending { it.lastAt }
                 trySend(list)
@@ -358,5 +409,44 @@ object Repo {
         val me = uid ?: return
         db.collection("chats").document(chatId)
             .set(mapOf("read" to mapOf(me to FieldValue.serverTimestamp())), SetOptions.merge())
+    }
+
+    /** Последнее сообщение чата дошло до этого телефона (вторая галочка у отправителя). */
+    fun markDelivered(chatId: String, lastAt: Long) {
+        if (deliveredMarked.put(chatId, lastAt) == lastAt) return
+        markDeliveredNow(chatId)
+    }
+
+    /** То же из push: задачу можно дождаться, пока Android не остановил процесс. */
+    fun markDeliveredNow(chatId: String): com.google.android.gms.tasks.Task<Void>? {
+        val me = uid ?: return null
+        return db.collection("chats").document(chatId)
+            .set(mapOf("delivered" to mapOf(me to FieldValue.serverTimestamp())), SetOptions.merge())
+    }
+
+    /** «Печатает…»: вызывать не чаще раза в несколько секунд. */
+    fun setTyping(chatId: String) {
+        val me = uid ?: return
+        db.collection("chats").document(chatId)
+            .set(mapOf("typing" to mapOf(me to FieldValue.serverTimestamp())), SetOptions.merge())
+    }
+
+    /** Жалоба на собеседника. Читать жалобы может только владелец проекта (консоль Firebase). */
+    suspend fun report(chatId: String, reported: String, reason: String, comment: String, evidence: List<Message>) {
+        val me = uid ?: error("Не выполнен вход")
+        db.collection("reports").add(
+            mapOf(
+                "from" to me,
+                "reported" to reported,
+                "chatId" to chatId,
+                "reason" to reason,
+                "comment" to comment.trim().take(500),
+                "messages" to evidence.takeLast(5).map {
+                    mapOf("type" to it.type, "text" to it.text.take(1000), "sentAt" to it.at)
+                },
+                "status" to "new",
+                "at" to FieldValue.serverTimestamp(),
+            ),
+        ).await()
     }
 }
