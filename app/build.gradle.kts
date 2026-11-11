@@ -7,14 +7,14 @@ plugins {
 
 android {
     namespace = "com.revgiler.messenger"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.revgiler.messenger"
         minSdk = 26
-        targetSdk = 35
-        versionCode = 11
-        versionName = "0.11"
+        targetSdk = 36
+        versionCode = 12
+        versionName = "0.12"
     }
 
     // Один ключ для всех сборок: его SHA-1 прописан в Firebase, без него не работает вход через Google.
@@ -28,6 +28,21 @@ android {
                 keyAlias = "app"
                 keyPassword = "app12345"
             }
+        }
+    }
+
+    // Две версии одного приложения:
+    //  github — для своего круга: APK из Releases и самообновление;
+    //  play   — для Google Play: без самообновления и без «особых» разрешений (их Play не пропускает).
+    flavorDimensions += "store"
+    productFlavors {
+        create("github") {
+            dimension = "store"
+            buildConfigField("boolean", "PLAY", "false")
+        }
+        create("play") {
+            dimension = "store"
+            buildConfigField("boolean", "PLAY", "true")
         }
     }
 
@@ -51,6 +66,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
     lint {
         abortOnError = false

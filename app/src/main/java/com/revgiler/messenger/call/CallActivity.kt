@@ -141,6 +141,12 @@ class CallActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // «Назад» не сбрасывает звонок случайно — только кнопка (на Android 16 работает только так)
+        onBackPressedDispatcher.addCallback(this, object : androidx.activity.OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                if (phase == Phase.Ended) finish() else moveTaskToBack(true)
+            }
+        })
         showOverLockScreen()
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         setContent { AppTheme(alwaysDarkBars = true) { CallUi() } }
@@ -418,11 +424,6 @@ class CallActivity : ComponentActivity() {
         super.onDestroy()
     }
 
-    @Deprecated("Deprecated in Java")
-    override fun onBackPressed() {
-        // «Назад» не сбрасывает звонок случайно — только кнопка
-        if (phase == Phase.Ended) super.onBackPressed() else moveTaskToBack(true)
-    }
 
     private fun hasPermission(name: String) =
         ContextCompat.checkSelfPermission(this, name) == PackageManager.PERMISSION_GRANTED

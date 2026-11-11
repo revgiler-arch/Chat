@@ -27,12 +27,17 @@ jobs:
           fi
           KEY_PASS=$(printf %s "$SIGNING_KEY_PASS" | tr -d '[:space:]'); export KEY_PASS
           openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -in app/app.keystore.enc -out app/app.keystore -pass env:KEY_PASS
-      - run: chmod +x gradlew && ./gradlew assembleRelease --stacktrace
-      - run: cp app/build/outputs/apk/release/*.apk Messenger.apk
+      # github — APK для своих (с самообновлением), play — AAB для загрузки в Google Play
+      - run: chmod +x gradlew && ./gradlew assembleGithubRelease bundlePlayRelease --stacktrace
+      - run: |
+          cp app/build/outputs/apk/github/release/*.apk Messenger.apk
+          cp app/build/outputs/bundle/playRelease/*.aab UChat-play.aab
       - uses: actions/upload-artifact@v4
         with:
           name: Messenger-apk
-          path: Messenger.apk
+          path: |
+            Messenger.apk
+            UChat-play.aab
       # Готовый APK в разделе Releases: прямая ссылка, без zip
       - name: Read version
         run: echo "VERSION_CODE=$(sed -n 's/.*versionCode = \([0-9]*\).*/\1/p' app/build.gradle.kts)" >> "$GITHUB_ENV"
@@ -45,5 +50,7 @@ jobs:
           tag_name: latest
           name: U chat (последняя сборка)
           body: "versionCode: ${{ env.VERSION_CODE }}"
-          files: Messenger.apk
+          files: |
+            Messenger.apk
+            UChat-play.aab
           make_latest: true

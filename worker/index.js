@@ -59,6 +59,8 @@ export default {
       if (!members.includes(sender)) return json({ error: "not a member" }, 403);
       const recipient = members.find((m) => m !== sender);
       if (!recipient) return json({ ok: true, sent: 0 });
+      // заблокирован — уведомлений нет (отмену звонка всё же пропускаем)
+      if (kind !== "cancel" && arr(chat, "blockedBy").length) return json({ ok: true, sent: 0, blocked: true });
 
       const [me, them] = await Promise.all([fs.get(`users/${sender}`), fs.get(`users/${recipient}`)]);
       const tokens = arr(them, "fcmTokens");
@@ -110,6 +112,7 @@ async function handleFile(request, env, chatId, fileId) {
   const token = await accessToken(JSON.parse(env.SERVICE_ACCOUNT));
   const chat = await firestore(env.PROJECT_ID, token).get(`chats/${chatId}`);
   if (!arr(chat, "members").includes(me)) return json({ error: "not a member" }, 403);
+  if (request.method === "PUT" && arr(chat, "blockedBy").length) return json({ error: "blocked" }, 403);
   const key = `${chatId}/${fileId}`;
 
   if (request.method === "GET") {

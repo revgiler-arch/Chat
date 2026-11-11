@@ -406,7 +406,9 @@ private fun ConversationScreen(vm: MainVm, chatId: String, other: Profile) {
     val wallpaper = remember(chatId, vm.stack.size) { Wallpapers.get(ctx, chatId) }
     var menu by remember { mutableStateOf(false) }
     var reporting by remember { mutableStateOf(false) }
+    var confirmBlock by remember { mutableStateOf(false) }
     val chat = vm.chats.firstOrNull { it.id == chatId }
+    val blocked = chat?.blocked == true
     val typing = chatId in vm.typingChats
     val recorder = remember { VoiceRecorder(ctx) }
     var recording by remember { mutableStateOf(false) }
@@ -463,8 +465,10 @@ private fun ConversationScreen(vm: MainVm, chatId: String, other: Profile) {
                     color = if (typing) C.Accent else C.TextDim, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
                 )
             }
-            IconButton(onClick = { call(false) }) { Icon(Icons.Filled.Call, "Звонок", tint = C.Text) }
-            IconButton(onClick = { call(true) }) { Icon(Icons.Filled.Videocam, "Видеозвонок", tint = C.Text) }
+            if (!blocked) {
+                IconButton(onClick = { call(false) }) { Icon(Icons.Filled.Call, "Звонок", tint = C.Text) }
+                IconButton(onClick = { call(true) }) { Icon(Icons.Filled.Videocam, "Видеозвонок", tint = C.Text) }
+            }
             Box {
                 IconButton(onClick = { menu = true }) { Icon(Icons.Filled.MoreVert, "Ещё", tint = C.Text) }
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
@@ -472,6 +476,17 @@ private fun ConversationScreen(vm: MainVm, chatId: String, other: Profile) {
                         menu = false
                         vm.open(Screen.Wallpaper(chatId))
                     })
+                    if (chat?.blockedByMe == true) {
+                        DropdownMenuItem(text = { Text("Разблокировать") }, onClick = {
+                            menu = false
+                            vm.setBlocked(chatId, false)
+                        })
+                    } else {
+                        DropdownMenuItem(text = { Text("Заблокировать", color = C.Bad) }, onClick = {
+                            menu = false
+                            confirmBlock = true
+                        })
+                    }
                     DropdownMenuItem(text = { Text("Пожаловаться", color = C.Bad) }, onClick = {
                         menu = false
                         reporting = true
@@ -500,7 +515,20 @@ private fun ConversationScreen(vm: MainVm, chatId: String, other: Profile) {
         vm.uploadProgress?.let { p ->
             LinearProgressIndicator(progress = { p }, color = C.Accent, modifier = Modifier.fillMaxWidth())
         }
-        Row(
+        if (blocked) {
+            Column(
+                Modifier.fillMaxWidth().background(C.Surface).padding(16.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Text(
+                    if (chat?.blockedByMe == true) "Вы заблокировали ${other.name}" else "Отправка сообщений этому пользователю недоступна",
+                    color = C.TextDim, fontSize = 14.sp,
+                )
+                if (chat?.blockedByMe == true) {
+                    TextButton(onClick = { vm.setBlocked(chatId, false) }) { Text("Разблокировать", color = C.Accent) }
+                }
+            }
+        } else Row(
             Modifier.fillMaxWidth().background(C.Surface).padding(8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -559,7 +587,7 @@ private fun ConversationScreen(vm: MainVm, chatId: String, other: Profile) {
                 }
             }
         }
-        if (emojiOpen && !recording) {
+        if (emojiOpen && !recording && !blocked) {
             BackHandler { emojiOpen = false }
             LazyVerticalGrid(
                 columns = GridCells.Adaptive(46.dp),
@@ -572,6 +600,28 @@ private fun ConversationScreen(vm: MainVm, chatId: String, other: Profile) {
                 }
             }
         }
+    }
+    if (confirmBlock) {
+        AlertDialog(
+            onDismissRequest = { confirmBlock = false },
+            containerColor = C.Surface,
+            title = { Text("Заблокировать ${other.name}?", color = C.Text) },
+            text = {
+                Text(
+                    "Он не сможет писать и звонить вам, а вы — ему. Разблокировать можно в любой момент в этом же меню.",
+                    color = C.TextDim, fontSize = 14.sp,
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmBlock = false
+                    vm.setBlocked(chatId, true) {
+                        Toast.makeText(ctx, "Пользователь заблокирован", Toast.LENGTH_SHORT).show()
+                    }
+                }) { Text("Заблокировать", color = C.Bad) }
+            },
+            dismissButton = { TextButton(onClick = { confirmBlock = false }) { Text("Отмена", color = C.Text) } },
+        )
     }
     if (reporting) {
         ReportDialog(
@@ -931,7 +981,7 @@ private fun SettingsScreen(vm: MainVm, me: Profile, activity: Activity) {
         Spacer(Modifier.height(10.dp))
         OutlinedButton(onClick = { vm.open(Screen.Wallpaper(null)) }, modifier = Modifier.fillMaxWidth()) { Text("Обои чатов") }
         Spacer(Modifier.height(10.dp))
-        OutlinedButton(
+        if (!com.revgiler.messenger.BuildConfig.PLAY) OutlinedButton(
             onClick = { if (vm.update != null) vm.installUpdate() else vm.checkUpdate(silent = false) },
             modifier = Modifier.fillMaxWidth(),
         ) { Text(if (vm.update != null) "Установить обновление" else "Проверить обновления") }

@@ -1,0 +1,24 @@
+name: Deploy Firestore rules
+
+# Выкладывает firestore.rules в Firebase (проект chat-59902) — не нужно вставлять руками в консоли.
+on:
+  push:
+    branches: [main]
+    paths: ["firestore.rules", "firebase.json", ".github/workflows/deploy-rules.yml"]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Deploy rules
+        env:
+          SA: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: |
+          printf '%s' "$SA" > "$RUNNER_TEMP/sa.json"
+          export GOOGLE_APPLICATION_CREDENTIALS="$RUNNER_TEMP/sa.json"
+          npx --yes firebase-tools@13 deploy --only firestore:rules --project chat-59902 --non-interactive

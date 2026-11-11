@@ -7,6 +7,14 @@ service cloud.firestore {
     function signedIn() { return request.auth != null; }
     function me() { return request.auth.uid; }
 
+    // id чата двух людей — как в приложении: uid по алфавиту через «_»
+    function chatOf(a, b) { return a < b ? a + '_' + b : b + '_' + a; }
+
+    // Блокировка: пока в чате кто-то кого-то заблокировал, ни писать, ни звонить нельзя
+    function chatOpen(chatId) {
+      return get(/databases/$(database)/documents/chats/$(chatId)).data.get('blockedBy', []).size() == 0;
+    }
+
     // Профили: читать может любой вошедший (чтобы находить друг друга), менять — только свой
     match /users/{uid} {
       allow read: if signedIn();
@@ -27,16 +35,22 @@ service cloud.firestore {
     match /chats/{chatId} {
       allow read: if signedIn() && me() in resource.data.members;
       allow create: if signedIn() && me() in request.resource.data.members
-        && request.resource.data.members.size() == 2;
+        && request.resource.data.members.size() == 2
+        && request.resource.data.get('blockedBy', []).toSet().hasOnly([me()]);
+      // blockedBy каждый меняет только за себя: добавить или убрать можно лишь свой uid
       allow update: if signedIn() && me() in resource.data.members
-        && request.resource.data.members == resource.data.members;
+        && request.resource.data.members == resource.data.members
+        && request.resource.data.get('blockedBy', []).toSet()
+             .difference(resource.data.get('blockedBy', []).toSet()).hasOnly([me()])
+        && resource.data.get('blockedBy', []).toSet()
+             .difference(request.resource.data.get('blockedBy', []).toSet()).hasOnly([me()]);
 
       match /messages/{msgId} {
         function member() {
           return me() in get(/databases/$(database)/documents/chats/$(chatId)).data.members;
         }
         allow read: if signedIn() && member();
-        allow create: if signedIn() && member()
+        allow create: if signedIn() && member() && chatOpen(chatId)
           && request.resource.data.from == me()
           && request.resource.data.text is string
           && request.resource.data.text.size() <= 4000
@@ -49,7 +63,7 @@ service cloud.firestore {
           return me() in get(/databases/$(database)/documents/chats/$(chatId)).data.members;
         }
         allow read: if signedIn() && memberM();
-        allow create: if signedIn() && memberM()
+        allow create: if signedIn() && memberM() && chatOpen(chatId)
           && request.resource.data.from == me()
           && request.resource.data.data is bytes
           && request.resource.data.data.size() <= 1000000;
@@ -80,7 +94,10 @@ service cloud.firestore {
     // Звонки: служебный документ для установки соединения (WebRTC). Доступ — только двум участникам.
     match /calls/{callId} {
       allow read: if signedIn() && (resource.data.from == me() || resource.data.to == me());
-      allow create: if signedIn() && request.resource.data.from == me();
+      allow create: if signedIn() && request.resource.data.from == me()
+        && request.resource.data.to is string
+        && (!exists(/databases/$(database)/documents/chats/$(chatOf(me(), request.resource.data.to)))
+            || chatOpen(chatOf(me(), request.resource.data.to)));
       allow update: if signedIn() && (resource.data.from == me() || resource.data.to == me())
         && request.resource.data.from == resource.data.from
         && request.resource.data.to == resource.data.to;

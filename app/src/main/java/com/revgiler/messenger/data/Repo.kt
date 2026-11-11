@@ -34,7 +34,13 @@ data class Chat(
     val otherReadAt: Long = 0,
     val otherTypingAt: Long = 0,
     val myDeliveredAt: Long = 0,
+    /** Я заблокировал собеседника. */
+    val blockedByMe: Boolean = false,
+    /** Собеседник заблокировал меня. */
+    val blockedByOther: Boolean = false,
 ) {
+    val blocked get() = blockedByMe || blockedByOther
+
     /** Галочки для моего сообщения, отправленного в момент [at]. */
     fun statusOf(at: Long): Delivery = when {
         at <= otherReadAt -> Delivery.READ
@@ -223,6 +229,17 @@ object Repo {
 
     fun chatId(a: String, b: String) = listOf(a, b).sorted().joinToString("_")
 
+    /**
+     * Заблокировать / разблокировать собеседника. Пока в чате есть блокировка, база не примет
+     * ни сообщений, ни звонков, ни файлов — ни от кого из двоих (так же, как в WhatsApp).
+     */
+    suspend fun setBlocked(chatId: String, block: Boolean) {
+        val me = uid ?: return
+        db.collection("chats").document(chatId)
+            .update("blockedBy", if (block) FieldValue.arrayUnion(me) else FieldValue.arrayRemove(me))
+            .await()
+    }
+
     /** Создать чат, если его ещё нет (повторный вызов ничего не ломает). */
     suspend fun openChat(other: String): String {
         val me = uid ?: error("Не выполнен вход")
@@ -246,6 +263,8 @@ object Repo {
                     val lastAt = d.getTimestamp("lastAt")?.toDate()?.time ?: 0L
                     val readAt = d.getTimestamp("read.$me")?.toDate()?.time ?: 0L
                     val lastFrom = d.getString("lastFrom")
+                    @Suppress("UNCHECKED_CAST")
+                    val blockedBy = d.get("blockedBy") as? List<String> ?: emptyList()
                     fun stamp(field: String) =
                         d.getTimestamp("$field", DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)?.toDate()?.time ?: 0L
                     Chat(
@@ -259,6 +278,8 @@ object Repo {
                         otherReadAt = stamp("read.$other"),
                         otherTypingAt = stamp("typing.$other"),
                         myDeliveredAt = stamp("delivered.$me"),
+                        blockedByMe = me in blockedBy,
+                        blockedByOther = other in blockedBy,
                     )
                 }.sortedByDescending { it.lastAt }
                 trySend(list)

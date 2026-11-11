@@ -75,7 +75,9 @@ class MainActivity : ComponentActivity() {
         val (key, text, action) = when {
             Build.VERSION.SDK_INT >= 34 && !nm.canUseFullScreenIntent() && !prefs.getBoolean("fullscreen", false) ->
                 Triple("fullscreen", "Разрешите полноэкранные уведомления, чтобы входящий звонок открывался на заблокированном экране.", Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT)
-            !pm.isIgnoringBatteryOptimizations(packageName) && !prefs.getBoolean("battery", false) ->
+            // версия для Play не просит снять ограничение батареи: Play пускает такое только по особому согласованию,
+            // а звонки и так будят телефон через высокоприоритетный push
+            !BuildConfig.PLAY && !pm.isIgnoringBatteryOptimizations(packageName) && !prefs.getBoolean("battery", false) ->
                 Triple("battery", "Снимите ограничение батареи, чтобы телефон в режиме сна не пропускал звонки.", Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
             else -> return
         }

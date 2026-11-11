@@ -486,6 +486,14 @@ class MainVm(app: Application) : AndroidViewModel(app) {
         Repo.send(chatId, text)
     }
 
+    fun setBlocked(chatId: String, block: Boolean, onDone: () -> Unit = {}) {
+        viewModelScope.launch {
+            runCatching { withTimeout(15_000) { Repo.setBlocked(chatId, block) } }
+                .onSuccess { onDone() }
+                .onFailure { error = "Не получилось: проверьте интернет" }
+        }
+    }
+
     /** Жалоба на собеседника; к ней прикладываем его последние сообщения. */
     fun report(chatId: String, other: Profile, reason: String, comment: String, onDone: () -> Unit) {
         val evidence = messages.filter { !it.fromMe }
@@ -527,6 +535,7 @@ class MainVm(app: Application) : AndroidViewModel(app) {
     // ---------------------------------------------------------------- обновления
 
     fun checkUpdate(silent: Boolean) {
+        if (com.revgiler.messenger.BuildConfig.PLAY) return // в версии для Play обновляет сам Play
         lastUpdateCheck = System.currentTimeMillis()
         viewModelScope.launch {
             if (!silent) updateStatus = "Проверяю…"
@@ -540,6 +549,7 @@ class MainVm(app: Application) : AndroidViewModel(app) {
     }
 
     fun installUpdate() {
+        if (com.revgiler.messenger.BuildConfig.PLAY) return
         val info = update ?: return
         val ctx = getApplication<Application>()
         if (!Updater.canInstall(ctx)) {
