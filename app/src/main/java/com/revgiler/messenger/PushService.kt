@@ -16,7 +16,7 @@ class PushService : FirebaseMessagingService() {
     override fun onMessageReceived(message: RemoteMessage) {
         val d = message.data
         val chatId = d["chatId"] ?: return
-        val title = d["title"].orEmpty().ifBlank { "Чат" }
+        val title = d["title"].orEmpty().ifBlank { "U chat" }
         when (d["kind"] ?: "message") {
             "call" -> {
                 val callId = d["callId"] ?: return

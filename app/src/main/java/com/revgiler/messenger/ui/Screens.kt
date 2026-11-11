@@ -86,6 +86,12 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Share
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
+import com.revgiler.messenger.R
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -171,11 +177,12 @@ private fun LoginScreen(vm: MainVm, activity: Activity) {
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Box(Modifier.size(84.dp).background(C.Accent, CircleShape), Alignment.Center) {
-            Text("💬", fontSize = 38.sp)
+        Box(Modifier.size(96.dp).clip(CircleShape)) {
+            Image(painterResource(R.drawable.ic_launcher_background), null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+            Image(painterResource(R.drawable.ic_launcher_foreground), null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
         }
         Spacer(Modifier.height(20.dp))
-        Text("Чат", color = C.Text, fontSize = 30.sp, fontWeight = FontWeight.Bold)
+        Text("U chat", color = C.Text, fontSize = 30.sp, fontWeight = FontWeight.Bold)
         Text("Только сообщения и звонки. Ничего лишнего.", color = C.TextDim, fontSize = 15.sp)
         Spacer(Modifier.height(36.dp))
         Button(
@@ -248,14 +255,16 @@ private fun ChatsScreen(vm: MainVm, me: Profile) {
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize()) {
             Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp, top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.clip(CircleShape).clickable { vm.open(Screen.Settings) }) { Avatar(me, 40.dp) }
+                Box(Modifier.clip(CircleShape).clickable { vm.open(Screen.Settings) }) { Avatar(me, 46.dp) }
                 Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f)) {
-                    Text("Чаты", color = C.Text, fontSize = 28.sp, fontWeight = FontWeight.Bold)
+                    Text("Чаты", color = C.Text, fontSize = 33.sp, fontWeight = FontWeight.Bold)
                     if (me.status.isNotBlank()) {
                         Text(me.status, color = C.TextDim, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                 }
+                val shareCtx = LocalContext.current
+                IconButton(onClick = { shareApp(shareCtx, me) }) { Icon(Icons.Filled.Share, "Поделиться", tint = C.TextDim) }
                 IconButton(onClick = { vm.open(Screen.Settings) }) { Icon(Icons.Filled.Settings, "Настройки", tint = C.TextDim) }
             }
             vm.update?.let {
@@ -867,11 +876,40 @@ private fun SettingsScreen(vm: MainVm, me: Profile, activity: Activity) {
         Spacer(Modifier.height(10.dp))
         val themeCtx = LocalContext.current
         Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-            Palettes.forEach { p ->
-                val selected = C.palette.id == p.id
+            // «Системная» — половина тёмная, половина светлая
+            run {
+                val selected = C.choice == SYSTEM_THEME
+                val dark = Palettes.first { it.id == "amethyst" }
+                val light = Palettes.first { it.id == "light" }
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
-                    modifier = Modifier.clip(RoundedCornerShape(10.dp)).clickable { C.choose(themeCtx, p) }.padding(4.dp),
+                    modifier = Modifier.clip(RoundedCornerShape(10.dp)).clickable { C.choose(themeCtx, SYSTEM_THEME) }.padding(4.dp),
+                ) {
+                    Box(
+                        Modifier.size(46.dp)
+                            .border(if (selected) 3.dp else 1.dp, if (selected) C.Text else C.TextDim.copy(alpha = 0.4f), CircleShape)
+                            .padding(5.dp).clip(CircleShape),
+                    ) {
+                        Row(Modifier.fillMaxSize()) {
+                            Box(Modifier.weight(1f).fillMaxHeight().background(light.bg))
+                            Box(Modifier.weight(1f).fillMaxHeight().background(dark.bg))
+                        }
+                        Box(Modifier.fillMaxSize().padding(8.dp).clip(CircleShape)) {
+                            Row(Modifier.fillMaxSize()) {
+                                Box(Modifier.weight(1f).fillMaxHeight().background(light.accent))
+                                Box(Modifier.weight(1f).fillMaxHeight().background(dark.accent))
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    Text("Системная", color = if (selected) C.Text else C.TextDim, fontSize = 12.sp, maxLines = 1)
+                }
+            }
+            Palettes.forEach { p ->
+                val selected = C.choice == p.id
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.clip(RoundedCornerShape(10.dp)).clickable { C.choose(themeCtx, p.id) }.padding(4.dp),
                 ) {
                     Box(
                         Modifier.size(46.dp)
@@ -884,6 +922,12 @@ private fun SettingsScreen(vm: MainVm, me: Profile, activity: Activity) {
             }
         }
         Spacer(Modifier.height(20.dp))
+        OutlinedButton(onClick = { shareApp(themeCtx, me) }, modifier = Modifier.fillMaxWidth()) {
+            Icon(Icons.Filled.Share, null, Modifier.size(18.dp))
+            Spacer(Modifier.width(8.dp))
+            Text("Пригласить друзей в U chat")
+        }
+        Spacer(Modifier.height(10.dp))
         OutlinedButton(onClick = { editing = true }, modifier = Modifier.fillMaxWidth()) { Text("Изменить имя или @username") }
         Spacer(Modifier.height(10.dp))
         OutlinedButton(onClick = { vm.open(Screen.Wallpaper(null)) }, modifier = Modifier.fillMaxWidth()) { Text("Обои чатов") }
@@ -973,4 +1017,21 @@ private fun dayTitle(t: Long): String {
         sameDay(t, now - 24L * 3_600_000) -> "Вчера"
         else -> SimpleDateFormat("d MMMM", Locale("ru")).format(Date(t))
     }
+}
+
+// ---------------------------------------------------------------- поделиться
+
+/** Ссылка на страницу в Google Play: открывается и в браузере, и сразу в приложении Play Маркет. */
+const val PLAY_URL = "https://play.google.com/store/apps/details?id=com.revgiler.messenger"
+
+/** Системное окно «Поделиться» — WhatsApp, Telegram, Instagram, SMS и всё, что стоит на телефоне. */
+fun shareApp(ctx: Context, me: Profile?) {
+    val who = me?.username?.takeIf { it.isNotBlank() }?.let { "\nМой ник: @$it — найди меня в поиске." }.orEmpty()
+    val text = "Пиши мне в U chat — лёгкий мессенджер без рекламы: только сообщения и звонки.$who\n$PLAY_URL"
+    val send = Intent(Intent.ACTION_SEND).apply {
+        type = "text/plain"
+        putExtra(Intent.EXTRA_SUBJECT, "U chat")
+        putExtra(Intent.EXTRA_TEXT, text)
+    }
+    ctx.startActivity(Intent.createChooser(send, "Пригласить в U chat").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
 }

@@ -43,7 +43,7 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
-          name: Мессенджер (последняя сборка)
+          name: U chat (последняя сборка)
           body: "versionCode: ${{ env.VERSION_CODE }}"
           files: Messenger.apk
           make_latest: true

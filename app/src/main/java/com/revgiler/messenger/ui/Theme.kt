@@ -2,6 +2,8 @@ package com.revgiler.messenger.ui
 
 import android.app.Activity
 import android.content.Context
+import android.content.res.Configuration
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
@@ -41,12 +43,29 @@ val Palettes = listOf(
     Palette("light", "Светлая", true, Color(0xFFEEF1F5), Color(0xFFFFFFFF), Color(0xFFE1E6ED), Color(0xFF3D6DF2), Color(0xFFD5E2FF), Color(0xFFFFFFFF), Color(0xFF1A1F27), Color(0xFF616B79)),
 )
 
+/** Особый выбор «Системная»: тёмная или светлая палитра — как тема телефона. */
+const val SYSTEM_THEME = "system"
+
 object C {
     private const val PREFS = "ui"
     private const val KEY = "palette"
 
-    var palette by mutableStateOf(Palettes.first())
+    /** Что выбрал пользователь: id палитры или [SYSTEM_THEME]. По умолчанию — как в системе. */
+    var choice by mutableStateOf(SYSTEM_THEME)
         private set
+
+    /** Тёмная ли сейчас тема телефона (обновляется из [AppTheme]). */
+    var systemDark by mutableStateOf(true)
+
+    private val systemDarkPalette get() = Palettes.first { it.id == "amethyst" }
+    private val systemLightPalette get() = Palettes.first { it.id == "light" }
+
+    val palette: Palette
+        get() = if (choice == SYSTEM_THEME) {
+            if (systemDark) systemDarkPalette else systemLightPalette
+        } else {
+            Palettes.firstOrNull { it.id == choice } ?: systemDarkPalette
+        }
 
     val Bg get() = palette.bg
     val Surface get() = palette.surface
@@ -60,18 +79,22 @@ object C {
 
     fun load(ctx: Context) {
         val id = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY, null)
-        palette = Palettes.firstOrNull { it.id == id } ?: Palettes.first()
+        choice = if (id == null || id == SYSTEM_THEME || Palettes.none { it.id == id }) SYSTEM_THEME else id
+        systemDark = (ctx.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) != Configuration.UI_MODE_NIGHT_NO
     }
 
-    fun choose(ctx: Context, p: Palette) {
-        palette = p
-        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY, p.id).apply()
+    fun choose(ctx: Context, id: String) {
+        choice = id
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY, id).apply()
     }
 }
 
 /** [alwaysDarkBars] — для экранов с постоянно тёмным фоном (звонок). */
 @Composable
 fun AppTheme(alwaysDarkBars: Boolean = false, content: @Composable () -> Unit) {
+    // Тема телефона: при её смене Compose перерисует экран, и «Системная» палитра подстроится
+    val sysDark = isSystemInDarkTheme()
+    if (C.systemDark != sysDark) SideEffect { C.systemDark = sysDark }
     val p = C.palette
     val view = LocalView.current
     if (!view.isInEditMode) {
