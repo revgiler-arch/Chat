@@ -89,7 +89,6 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.fillMaxHeight
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
 import com.revgiler.messenger.R
 import androidx.compose.material3.Button
