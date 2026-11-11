@@ -14,6 +14,15 @@
 
 ## Сборка
 
+Две версии (productFlavors):
+- **github** — `Messenger.apk` для своих, с самообновлением из Releases;
+- **play** — `UChat-play.aab` для загрузки в Google Play: без самообновления, без разрешений
+  `REQUEST_INSTALL_PACKAGES` и `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`.
+
+Правила `firestore.rules` выкладывает workflow «Deploy Firestore rules». Чтобы он работал, сервисному
+аккаунту из `FIREBASE_SERVICE_ACCOUNT` нужна роль **Firebase Rules Admin** (Google Cloud → IAM).
+Без неё правила вставляются вручную: Firebase → Firestore → Rules → Publish.
+
 APK собирает GitHub Actions при каждом пуше в `main` и выкладывает в Releases (тег `latest`);
 приложение само проверяет там обновления. Нужен секрет `SIGNING_KEY_PASS`.
 
