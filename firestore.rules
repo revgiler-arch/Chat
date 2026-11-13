@@ -36,6 +36,8 @@ service cloud.firestore {
       allow read: if signedIn() && me() in resource.data.members;
       allow create: if signedIn() && me() in request.resource.data.members
         && request.resource.data.members.size() == 2
+        // id чата обязан совпадать с парой участников — иначе можно «занять» чужой чат заранее
+        && chatId == chatOf(request.resource.data.members[0], request.resource.data.members[1])
         && request.resource.data.get('blockedBy', []).toSet().hasOnly([me()]);
       // blockedBy каждый меняет только за себя: добавить или убрать можно лишь свой uid
       allow update: if signedIn() && me() in resource.data.members
