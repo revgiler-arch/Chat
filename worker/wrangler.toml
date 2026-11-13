@@ -8,3 +8,7 @@ bucket_name = "chat-files"
 
 [vars]
 PROJECT_ID = "chat-59902"
+# публичный веб-ключ Firebase (тот же, что в google-services.json) — для входа на странице /delete-account
+WEB_API_KEY = "AIzaSyCRK6kPDzcLDqw7_2ry_-sZZJ79OuFN61c"
+# почта для связи на страницах /privacy и /delete-account (пусто — показываем путь через приложение)
+CONTACT_EMAIL = ""

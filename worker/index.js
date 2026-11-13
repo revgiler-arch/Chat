@@ -6,6 +6,8 @@
 //
 // Секрет SERVICE_ACCOUNT — JSON сервисного аккаунта Firebase (Настройки проекта → Сервисные аккаунты).
 
+import { privacyPage, deletePage } from "./pages.js";
+
 const JWKS_URL =
   "https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com";
 
@@ -15,6 +17,8 @@ export default {
     if (request.method === "GET" && url.pathname === "/") {
       return json({ ok: true, service: "chat-push" });
     }
+    if (request.method === "GET" && url.pathname === "/privacy") return privacyPage(env);
+    if (request.method === "GET" && url.pathname === "/delete-account") return deletePage(env);
     if (request.method === "GET" && url.pathname === "/turn") {
       try {
         const idToken = (request.headers.get("Authorization") || "").replace(/^Bearer\s+/i, "");

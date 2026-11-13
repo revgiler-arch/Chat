@@ -993,7 +993,12 @@ private fun SettingsScreen(vm: MainVm, me: Profile, activity: Activity) {
             if (vm.busy) CircularProgressIndicator(Modifier.size(18.dp), color = C.Bad, strokeWidth = 2.dp)
             else Text("Удалить аккаунт", color = C.Bad)
         }
-        Spacer(Modifier.height(24.dp))
+        Spacer(Modifier.height(16.dp))
+        TextButton(onClick = {
+            runCatching {
+                themeCtx.startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(PRIVACY_URL)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            }
+        }) { Text("Политика конфиденциальности", color = C.TextDim, fontSize = 13.sp) }
         Text("Версия ${App.instance.versionName()}", color = C.TextDim, fontSize = 13.sp)
     }
     if (confirmDelete) {
@@ -1071,6 +1076,8 @@ private fun dayTitle(t: Long): String {
 // ---------------------------------------------------------------- поделиться
 
 /** Ссылка на страницу в Google Play: открывается и в браузере, и сразу в приложении Play Маркет. */
+const val PRIVACY_URL = "https://chat-push.revgiler.workers.dev/privacy"
+
 const val PLAY_URL = "https://play.google.com/store/apps/details?id=com.revgiler.messenger"
 
 /** Системное окно «Поделиться» — WhatsApp, Telegram, Instagram, SMS и всё, что стоит на телефоне. */
