@@ -319,12 +319,12 @@ object Repo {
     }
 
     /** Отправка. Работает и без сети: Firestore сохранит и дошлёт сам. */
-    fun send(chatId: String, text: String) {
-        val me = uid ?: return
+    fun send(chatId: String, text: String, push: Boolean = true): com.google.android.gms.tasks.Task<Void>? {
+        val me = uid ?: return null
         val clean = text.trim().take(4000)
-        if (clean.isEmpty()) return
+        if (clean.isEmpty()) return null
         val chatRef = db.collection("chats").document(chatId)
-        db.batch()
+        return db.batch()
             .set(
                 chatRef.collection("messages").document(),
                 mapOf("from" to me, "text" to clean, "at" to FieldValue.serverTimestamp()),
@@ -340,7 +340,7 @@ object Repo {
                 SetOptions.merge(),
             )
             .commit()
-            .addOnSuccessListener { Push.notify(chatId) }
+            .addOnSuccessListener { if (push) Push.notify(chatId) }
     }
 
     /**
@@ -426,9 +426,9 @@ object Repo {
             .commit()
     }
 
-    fun markRead(chatId: String) {
-        val me = uid ?: return
-        db.collection("chats").document(chatId)
+    fun markRead(chatId: String): com.google.android.gms.tasks.Task<Void>? {
+        val me = uid ?: return null
+        return db.collection("chats").document(chatId)
             .set(mapOf("read" to mapOf(me to FieldValue.serverTimestamp())), SetOptions.merge())
     }
 

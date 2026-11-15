@@ -62,10 +62,15 @@ object Push {
 
     /** Разбудить телефон собеседника. Ошибки молча игнорируем: сообщение всё равно уже в базе. */
     fun notify(chatId: String, kind: String = "message", callId: String = "", video: Boolean = false) {
-        scope.launch {
+        scope.launch { notifyNow(chatId, kind, callId, video) }
+    }
+
+    /** То же, но дожидаясь отправки — для ответа из шторки, когда приложение закрыто. */
+    suspend fun notifyNow(chatId: String, kind: String = "message", callId: String = "", video: Boolean = false) {
+        withContext(Dispatchers.IO) {
             runCatching {
-                val base = serverUrl() ?: return@launch
-                val token = idToken() ?: return@launch
+                val base = serverUrl() ?: return@runCatching
+                val token = idToken() ?: return@runCatching
                 val body = JSONObject()
                     .put("chatId", chatId).put("kind", kind).put("callId", callId).put("video", video)
                     .toString().toRequestBody("application/json".toMediaType())

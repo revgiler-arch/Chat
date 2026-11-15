@@ -47,6 +47,9 @@
             android:taskAffinity=".call"
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|smallestScreenSize" />
 
+        <!-- ответ и «прочитано» из уведомления -->
+        <receiver android:name=".ReplyReceiver" android:exported="false" />
+
         <service
             android:name=".PushService"
             android:exported="false">
