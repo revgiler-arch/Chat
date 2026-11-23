@@ -53,12 +53,16 @@ object Notifier {
     private val history = mutableMapOf<String, ArrayDeque<Line>>()
     private val titles = mutableMapOf<String, String>()
 
-    fun showMessage(ctx: Context, chatId: String, title: String, body: String) {
+    private val groups = mutableSetOf<String>()
+
+    /** [sender] — имя автора в группе; для личного чата null (автор = [title]). */
+    fun showMessage(ctx: Context, chatId: String, title: String, body: String, sender: String? = null) {
         if (App.visibleChatId == chatId) return // этот чат и так открыт
         synchronized(history) {
             titles[chatId] = title
+            if (sender != null) groups += chatId
             history.getOrPut(chatId) { ArrayDeque() }.apply {
-                addLast(Line(title, body, System.currentTimeMillis()))
+                addLast(Line(sender ?: title, body, System.currentTimeMillis()))
                 while (size > 8) removeFirst()
             }
         }
@@ -91,9 +95,14 @@ object Notifier {
         )
 
         val me = Person.Builder().setName("Вы").build()
-        val other = Person.Builder().setName(title).setKey(chatId).build()
+        val isGroup = synchronized(history) { chatId in groups }
         val style = NotificationCompat.MessagingStyle(me)
-        lines.forEach { style.addMessage(it.text, it.at, if (it.from == null) null else other) }
+        if (isGroup) style.setConversationTitle(title).setGroupConversation(true)
+        val persons = HashMap<String, Person>()
+        lines.forEach { l ->
+            val p = l.from?.let { name -> persons.getOrPut(name) { Person.Builder().setName(name).setKey("$chatId/$name").build() } }
+            style.addMessage(l.text, l.at, p)
+        }
 
         // «Ответить» — поле ввода прямо в шторке
         val replyIntent = PendingIntent.getBroadcast(
@@ -136,14 +145,42 @@ object Notifier {
         notify(ctx, id, n)
     }
 
+    /** Приглашение в группу: открывает приложение, там его можно принять или отклонить. */
+    fun showInvite(ctx: Context, chatId: String, groupName: String, body: String) {
+        ensureChannels(ctx)
+        val id = messageId("invite/$chatId")
+        val open = PendingIntent.getActivity(
+            ctx, id,
+            Intent(ctx, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        val n = NotificationCompat.Builder(ctx, CH_MESSAGES)
+            .setSmallIcon(R.drawable.ic_stat_chat)
+            .setContentTitle("Приглашение в «$groupName»")
+            .setContentText(body)
+            .setCategory(NotificationCompat.CATEGORY_SOCIAL)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setAutoCancel(true)
+            .setContentIntent(open)
+            .build()
+        notify(ctx, id, n)
+    }
+
+    fun clearInvite(ctx: Context, chatId: String) {
+        NotificationManagerCompat.from(ctx).cancel(messageId("invite/$chatId"))
+    }
+
     fun clearChat(ctx: Context, chatId: String) {
         synchronized(history) { history.remove(chatId) }
         NotificationManagerCompat.from(ctx).cancel(messageId(chatId))
     }
 
-    fun showIncomingCall(ctx: Context, callId: String, title: String, video: Boolean) {
+    /** [groupChatId] — групповой звонок: открываем экран группового звонка. */
+    fun showIncomingCall(ctx: Context, callId: String, title: String, video: Boolean, groupChatId: String? = null) {
         ensureChannels(ctx)
-        fun intent(action: String?) = Intent(ctx, CallActivity::class.java)
+        fun intent(action: String?): Intent = if (groupChatId != null) {
+            com.revgiler.messenger.call.GroupCallActivity.incoming(ctx, groupChatId, callId, title, video, action)
+        } else Intent(ctx, CallActivity::class.java)
             .putExtra(CallActivity.EXTRA_CALL_ID, callId)
             .putExtra(CallActivity.EXTRA_INCOMING, true)
             .putExtra(CallActivity.EXTRA_VIDEO, video)
@@ -158,7 +195,13 @@ object Notifier {
         val n = NotificationCompat.Builder(ctx, CH_CALLS)
             .setSmallIcon(R.drawable.ic_stat_chat)
             .setContentTitle(title)
-            .setContentText(if (video) "Входящий видеозвонок" else "Входящий звонок")
+            .setContentText(
+                when {
+                    groupChatId != null -> if (video) "Групповой видеозвонок" else "Групповой звонок"
+                    video -> "Входящий видеозвонок"
+                    else -> "Входящий звонок"
+                },
+            )
             .setCategory(NotificationCompat.CATEGORY_CALL)
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setOngoing(true)

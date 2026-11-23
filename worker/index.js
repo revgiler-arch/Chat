@@ -50,7 +50,7 @@ export default {
       const idToken = (request.headers.get("Authorization") || "").replace(/^Bearer\s+/i, "");
       const sender = await verifyIdToken(idToken, env.PROJECT_ID);
       const { chatId, kind = "message", callId = "", video = false } = await request.json();
-      if (!["message", "call", "cancel"].includes(kind)) return json({ error: "bad kind" }, 400);
+      if (!["message", "call", "cancel", "invite", "gcall", "gcancel"].includes(kind)) return json({ error: "bad kind" }, 400);
       if (typeof chatId !== "string" || !/^[A-Za-z0-9_-]{10,200}$/.test(chatId)) {
         return json({ error: "bad chatId" }, 400);
       }
@@ -61,42 +61,58 @@ export default {
       const chat = await fs.get(`chats/${chatId}`);
       const members = arr(chat, "members");
       if (!members.includes(sender)) return json({ error: "not a member" }, 403);
-      const recipient = members.find((m) => m !== sender);
-      if (!recipient) return json({ ok: true, sent: 0 });
-      // заблокирован — уведомлений нет (отмену звонка всё же пропускаем)
-      if (kind !== "cancel" && arr(chat, "blockedBy").length) return json({ ok: true, sent: 0, blocked: true });
+      const group = str(chat, "type") === "group";
+      const me = await fs.get(`users/${sender}`);
+      const senderName = str(me, "name") || str(me, "username") || "";
 
-      const [me, them] = await Promise.all([fs.get(`users/${sender}`), fs.get(`users/${recipient}`)]);
-      const tokens = arr(them, "fcmTokens");
-      const title = str(me, "name") || str(me, "username") || "Новое сообщение";
+      // Кому: в группе — всем остальным участникам; приглашение — только приглашённым (шлёт владелец)
+      let recipients;
+      if (kind === "invite") {
+        if (!group || str(chat, "owner") !== sender) return json({ error: "only owner invites" }, 403);
+        recipients = arr(chat, "invited");
+      } else {
+        recipients = members.filter((m) => m !== sender);
+        // заблокирован — уведомлений нет (отмену звонка всё же пропускаем)
+        if (!group && kind !== "cancel" && arr(chat, "blockedBy").length) return json({ ok: true, sent: 0, blocked: true });
+      }
+      if (!recipients.length) return json({ ok: true, sent: 0 });
+
+      const groupName = str(chat, "name") || "Группа";
+      const title = group ? groupName : senderName || "Новое сообщение";
       const body =
-        kind === "call" ? (video ? "Входящий видеозвонок" : "Входящий звонок") :
-        kind === "cancel" ? "" :
+        kind === "invite" ? `${senderName || "Вас"} приглашает вас в группу` :
+        kind === "call" || kind === "gcall" ? (video ? "Входящий видеозвонок" : "Входящий звонок") :
+        kind === "cancel" || kind === "gcancel" ? "" :
         str(chat, "lastText") || "Новое сообщение";
 
+      const people = await Promise.all(recipients.slice(0, 50).map((uid) => fs.get(`users/${uid}`).then((d) => [uid, d])));
       let sent = 0;
-      const dead = [];
-      for (const t of tokens) {
-        const r = await fetch(`https://fcm.googleapis.com/v1/projects/${env.PROJECT_ID}/messages:send`, {
-          method: "POST",
-          headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-          body: JSON.stringify({
-            message: {
-              token: t,
-              // только данные: уведомление рисует само приложение (своё оформление и открытие чата)
-              data: {
-                kind, chatId, senderUid: sender, title, body: body.slice(0, 300),
-                callId: String(callId).slice(0, 100), video: video ? "1" : "0",
+      for (const [uid, them] of people) {
+        const tokens = arr(them, "fcmTokens");
+        const dead = [];
+        for (const t of tokens) {
+          const r = await fetch(`https://fcm.googleapis.com/v1/projects/${env.PROJECT_ID}/messages:send`, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+            body: JSON.stringify({
+              message: {
+                token: t,
+                // только данные: уведомление рисует само приложение (своё оформление и открытие чата)
+                data: {
+                  kind, chatId, senderUid: sender, title, body: body.slice(0, 300),
+                  senderName: senderName.slice(0, 60), group: group ? "1" : "0",
+                  callId: String(callId).slice(0, 100), video: video ? "1" : "0",
+                },
+                // звонок без ответа через минуту уже не нужен
+                android: { priority: "high", ttl: ["message", "invite"].includes(kind) ? "86400s" : "60s" },
               },
-              // звонок без ответа через минуту уже не нужен
-              android: { priority: "high", ttl: kind === "message" ? "86400s" : "60s" },
-            },
-          }),
-        });
-        if (r.ok) sent++;
-        else if (r.status === 404 || r.status === 400) dead.push(t);
+            }),
+          });
+          if (r.ok) sent++;
+          else if (r.status === 404 || r.status === 400) dead.push(t);
+        }
+        if (dead.length) await fs.removeFromArray(`users/${uid}`, "fcmTokens", dead).catch(() => {});
       }
-      if (dead.length) await fs.removeFromArray(`users/${recipient}`, "fcmTokens", dead).catch(() => {});
       return json({ ok: true, sent });
     } catch (e) {
       const status = e.status || 500;
@@ -168,8 +184,25 @@ async function deleteUserData(fs, env, uid, budget) {
     const chats = await fs.queryNames("chats", "members", "ARRAY_CONTAINS", uid, 20);
     if (!chats.length) break;
     for (const path of chats) {
-      if (!(await deleteChat(fs, env, path, budget))) return false;
+      if (budget.left < 2) return false;
+      budget.left--;
+      const chat = await fs.get(path);
+      const rest = arr(chat, "members").filter((m) => m !== uid);
+      if (str(chat, "type") === "group" && rest.length) {
+        // из группы человек просто уходит, переписка остаётся у остальных
+        budget.left--;
+        await fs.removeFromArray(path, "members", [uid]);
+        if (str(chat, "owner") === uid) await fs.setString(path, "owner", rest[0]);
+      } else if (!(await deleteChat(fs, env, path, budget))) return false;
     }
+  }
+  // Неотвеченные приглашения в группы
+  while (true) {
+    if (budget.left < 2) return false;
+    budget.left -= 2;
+    const groups = await fs.queryNames("chats", "invited", "ARRAY_CONTAINS", uid, 20);
+    if (!groups.length) break;
+    for (const path of groups) await fs.removeFromArray(path, "invited", [uid]);
   }
   // Служебные документы звонков, где человек был участником
   for (const field of ["from", "to"]) {
@@ -368,6 +401,14 @@ function firestore(projectId, token) {
         body: JSON.stringify({ writes: names.map((name) => ({ delete: name })) }),
       });
       if (!r.ok) throw new Error(`firestore delete ${r.status}`);
+    },
+    async setString(path, field, value) {
+      const r = await fetch(`${base}/${path}?updateMask.fieldPaths=${field}`, {
+        method: "PATCH",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ fields: { [field]: { stringValue: value } } }),
+      });
+      if (!r.ok) throw new Error(`firestore patch ${r.status}`);
     },
     async removeFromArray(path, field, values) {
       const name = `projects/${projectId}/databases/(default)/documents/${path}`;

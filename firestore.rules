@@ -31,21 +31,77 @@ service cloud.firestore {
       allow delete: if signedIn() && resource.data.uid == me();
     }
 
-    // Чаты на двоих: доступ только участникам
+    function isGroup(d) { return d.get('type', 'direct') == 'group'; }
+    function setOf(d, f) { return d.get(f, []).toSet(); }
+
+    // Группы: владелец меняет название, приглашает и удаляет участников; вступить можно
+    // только самому, приняв приглашение (напрямую добавить человека в участники нельзя)
+    function groupUpdate() {
+      let d0 = resource.data;
+      let d1 = request.resource.data;
+      let changed = d1.diff(d0).affectedKeys();
+      let joined = setOf(d1, 'members').difference(setOf(d0, 'members'));
+      let left = setOf(d0, 'members').difference(setOf(d1, 'members'));
+      let uninvited = setOf(d0, 'invited').difference(setOf(d1, 'invited'));
+      let newInvites = setOf(d1, 'invited').difference(setOf(d0, 'invited'));
+      return d1.get('type', '') == 'group' && (
+        // обычная жизнь чата: последнее сообщение, прочитано, печатает…
+        (me() in d0.members && !changed.hasAny(['type', 'owner', 'members', 'invited', 'invitedBy', 'name']))
+        // владелец: название, приглашения, удаление участников
+        || (me() == d0.owner && d1.owner == d0.owner && me() in d1.members
+            && joined.size() == 0
+            && d1.members.size() + d1.get('invited', []).size() <= 50
+            && !setOf(d1, 'invited').hasAny(d1.members)
+            && d1.name is string && d1.name.size() >= 1 && d1.name.size() <= 50)
+        // принять приглашение: только себя, из invited в members
+        || (me() in d0.get('invited', []) && changed.hasOnly(['members', 'invited', 'read'])
+            && uninvited == [me()].toSet() && newInvites.size() == 0
+            && joined == [me()].toSet() && left.size() == 0)
+        // отклонить приглашение
+        || (me() in d0.get('invited', []) && changed.hasOnly(['invited'])
+            && uninvited == [me()].toSet() && newInvites.size() == 0)
+        // выйти из группы; владелец при выходе передаёт группу другому участнику
+        || (me() in d0.members && changed.hasOnly(['members', 'owner'])
+            && left == [me()].toSet() && joined.size() == 0
+            && (d0.owner != me() ? d1.owner == d0.owner : d1.owner in d1.members))
+      );
+    }
+
+    // Чаты: на двоих и группы. Доступ — участникам; приглашённые видят только саму группу
     match /chats/{chatId} {
-      allow read: if signedIn() && me() in resource.data.members;
-      allow create: if signedIn() && me() in request.resource.data.members
-        && request.resource.data.members.size() == 2
-        // id чата обязан совпадать с парой участников — иначе можно «занять» чужой чат заранее
-        && chatId == chatOf(request.resource.data.members[0], request.resource.data.members[1])
-        && request.resource.data.get('blockedBy', []).toSet().hasOnly([me()]);
-      // blockedBy каждый меняет только за себя: добавить или убрать можно лишь свой uid
-      allow update: if signedIn() && me() in resource.data.members
-        && request.resource.data.members == resource.data.members
-        && request.resource.data.get('blockedBy', []).toSet()
-             .difference(resource.data.get('blockedBy', []).toSet()).hasOnly([me()])
-        && resource.data.get('blockedBy', []).toSet()
-             .difference(request.resource.data.get('blockedBy', []).toSet()).hasOnly([me()]);
+      allow read: if signedIn()
+        && (me() in resource.data.members || me() in resource.data.invited);
+      allow create: if signedIn() && (
+        (!isGroup(request.resource.data)
+          && me() in request.resource.data.members
+          && request.resource.data.members.size() == 2
+          // id чата обязан совпадать с парой участников — иначе можно «занять» чужой чат заранее
+          && chatId == chatOf(request.resource.data.members[0], request.resource.data.members[1])
+          && request.resource.data.get('blockedBy', []).toSet().hasOnly([me()]))
+        || (isGroup(request.resource.data)
+          && chatId.matches('g_[A-Za-z0-9]{10,40}')
+          && request.resource.data.owner == me()
+          && request.resource.data.members == [me()]
+          && request.resource.data.invited is list
+          && request.resource.data.invited.size() <= 49
+          && !(me() in request.resource.data.invited)
+          && request.resource.data.name is string
+          && request.resource.data.name.size() >= 1 && request.resource.data.name.size() <= 50)
+      );
+      allow update: if signedIn() && (
+        (!isGroup(resource.data) && !isGroup(request.resource.data)
+          && me() in resource.data.members
+          && request.resource.data.members == resource.data.members
+          // blockedBy каждый меняет только за себя: добавить или убрать можно лишь свой uid
+          && request.resource.data.get('blockedBy', []).toSet()
+               .difference(resource.data.get('blockedBy', []).toSet()).hasOnly([me()])
+          && resource.data.get('blockedBy', []).toSet()
+               .difference(request.resource.data.get('blockedBy', []).toSet()).hasOnly([me()]))
+        || (isGroup(resource.data) && groupUpdate())
+      );
+      // последний участник может удалить группу целиком
+      allow delete: if signedIn() && isGroup(resource.data)
+        && resource.data.owner == me() && resource.data.members == [me()];
 
       match /messages/{msgId} {
         function member() {
@@ -91,6 +147,37 @@ service cloud.firestore {
         && request.resource.data.messages.size() <= 5
         && request.resource.data.status == 'new'
         && request.resource.data.at == request.time;
+    }
+
+    // Групповые звонки: доступ — участникам группы. Каждый добавляет/убирает из звонка только себя.
+    function inGroup(chatId) {
+      return me() in get(/databases/$(database)/documents/chats/$(chatId)).data.members;
+    }
+    match /groupCalls/{callId} {
+      function callChat() { return get(/databases/$(database)/documents/groupCalls/$(callId)).data.chatId; }
+      allow read: if signedIn() && inGroup(resource.data.chatId);
+      allow create: if signedIn() && request.resource.data.from == me()
+        && request.resource.data.chatId is string
+        && inGroup(request.resource.data.chatId)
+        && request.resource.data.participants == [me()]
+        && request.resource.data.ended == false;
+      allow update: if signedIn() && inGroup(resource.data.chatId)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['participants', 'ended'])
+        && request.resource.data.participants.toSet().difference(resource.data.participants.toSet()).hasOnly([me()])
+        && resource.data.participants.toSet().difference(request.resource.data.participants.toSet()).hasOnly([me()])
+        && request.resource.data.participants.size() <= 8;
+
+      match /links/{linkId} {
+        allow read: if signedIn() && inGroup(callChat());
+        allow create, update: if signedIn() && inGroup(callChat())
+          && (request.resource.data.from == me() || request.resource.data.to == me())
+          && linkId.split('_').hasAll([request.resource.data.from, request.resource.data.to]);
+
+        match /ice/{iceId} {
+          allow read: if signedIn() && inGroup(callChat());
+          allow create: if signedIn() && inGroup(callChat()) && request.resource.data.from == me();
+        }
+      }
     }
 
     // Звонки: служебный документ для установки соединения (WebRTC). Доступ — только двум участникам.

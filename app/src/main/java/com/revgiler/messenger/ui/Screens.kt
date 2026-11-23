@@ -83,6 +83,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
@@ -146,6 +147,8 @@ fun MessengerApp(vm: MainVm, activity: Activity) {
                     Screen.NewChat -> NewChatScreen(vm)
                     Screen.Settings -> SettingsScreen(vm, a.me, activity)
                     is Screen.Conversation -> ConversationScreen(vm, s.chatId, s.other)
+                    Screen.NewGroup -> NewGroupScreen(vm)
+                    is Screen.GroupInfo -> GroupInfoScreen(vm, s.chatId, a.me)
                     is Screen.Wallpaper -> WallpaperScreen(s.chatId) { vm.back() }
                 }
             }
@@ -274,7 +277,7 @@ private fun ChatsScreen(vm: MainVm, me: Profile) {
                     Text(vm.updateStatus ?: "Доступна новая версия — нажмите, чтобы обновить", color = C.Text)
                 }
             }
-            if (vm.chats.isEmpty()) {
+            if (vm.chats.isEmpty() && vm.invites.isEmpty()) {
                 Column(Modifier.fillMaxSize().padding(32.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
                     Text("Пока нет чатов", color = C.Text, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
                     Spacer(Modifier.height(6.dp))
@@ -285,7 +288,14 @@ private fun ChatsScreen(vm: MainVm, me: Profile) {
                 }
             } else {
                 LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 90.dp)) {
-                    items(vm.chats, key = { it.id }) { chat -> ChatRow(chat, vm.people[chat.otherUid], chat.id in vm.typingChats) { vm.openChat(chat) } }
+                    items(vm.invites, key = { "inv/" + it.chatId }) { inv -> InviteCard(inv, vm.people[inv.fromUid ?: ""], vm) }
+                    items(vm.chats, key = { it.id }) { chat ->
+                        if (chat.isGroup) {
+                            GroupRow(chat, vm.people, chat.id in vm.typingChats) { vm.openChat(chat) }
+                        } else {
+                            ChatRow(chat, vm.people[chat.otherUid], chat.id in vm.typingChats) { vm.openChat(chat) }
+                        }
+                    }
                 }
             }
         }
@@ -332,7 +342,7 @@ private fun ChatRow(chat: Chat, other: Profile?, typing: Boolean, onClick: () ->
 }
 
 @Composable
-private fun Avatar(p: Profile?, size: Dp) {
+internal fun Avatar(p: Profile?, size: Dp) {
     Box(Modifier.size(size).clip(CircleShape).background(C.SurfaceHi), Alignment.Center) {
         Text(
             (p?.name ?: "?").take(1).uppercase(),
@@ -360,7 +370,21 @@ private fun NewChatScreen(vm: MainVm) {
             IconButton(onClick = { vm.back() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = C.Text) }
             Text("Новый чат", color = C.Text, fontSize = 22.sp, fontWeight = FontWeight.Bold)
         }
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(8.dp))
+        Row(
+            Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(C.Surface)
+                .clickable { vm.open(Screen.NewGroup) }.padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(Modifier.size(44.dp).background(C.Accent, CircleShape), Alignment.Center) {
+                Icon(Icons.Filled.Groups, null, tint = Color.White)
+            }
+            Spacer(Modifier.width(12.dp))
+            Text("Создать группу", color = C.Text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+        }
+        Spacer(Modifier.height(16.dp))
+        Text("Или найдите человека для личного чата:", color = C.TextDim, fontSize = 14.sp)
+        Spacer(Modifier.height(8.dp))
         OutlinedTextField(
             value = query,
             onValueChange = { query = it.lowercase().filter { c -> c.isLetterOrDigit() || c == '_' || c == '@' }.take(21) },
@@ -408,6 +432,7 @@ private fun ConversationScreen(vm: MainVm, chatId: String, other: Profile) {
     var reporting by remember { mutableStateOf(false) }
     var confirmBlock by remember { mutableStateOf(false) }
     val chat = vm.chats.firstOrNull { it.id == chatId }
+    val isGroup = chatId.startsWith("g_")
     val blocked = chat?.blocked == true
     val typing = chatId in vm.typingChats
     val recorder = remember { VoiceRecorder(ctx) }
@@ -447,7 +472,11 @@ private fun ConversationScreen(vm: MainVm, chatId: String, other: Profile) {
         if (msgs.isNotEmpty()) listState.animateScrollToItem(msgs.lastIndex)
     }
     fun call(video: Boolean) {
-        ctx.startActivity(CallActivity.outgoing(ctx, other.uid, chatId, other.name, video))
+        if (isGroup) {
+            ctx.startActivity(com.revgiler.messenger.call.GroupCallActivity.start(ctx, chatId, chat?.name ?: other.name, video))
+        } else {
+            ctx.startActivity(CallActivity.outgoing(ctx, other.uid, chatId, other.name, video))
+        }
     }
 
     Column(Modifier.fillMaxSize().imePadding()) {
@@ -456,14 +485,26 @@ private fun ConversationScreen(vm: MainVm, chatId: String, other: Profile) {
             verticalAlignment = Alignment.CenterVertically,
         ) {
             IconButton(onClick = { vm.back() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = C.Text) }
-            Avatar(other, 40.dp)
-            Spacer(Modifier.width(10.dp))
-            Column(Modifier.weight(1f)) {
-                Text(other.name, color = C.Text, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(
-                    if (typing) "печатает…" else other.status.ifBlank { "@${other.username}" },
-                    color = if (typing) C.Accent else C.TextDim, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                )
+            Row(
+                Modifier.weight(1f).clip(RoundedCornerShape(10.dp))
+                    .clickable(enabled = isGroup) { vm.open(Screen.GroupInfo(chatId)) },
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (isGroup) GroupAvatar(chat?.name ?: other.name, 40.dp) else Avatar(other, 40.dp)
+                Spacer(Modifier.width(10.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(chat?.name?.takeIf { isGroup } ?: other.name, color = C.Text, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    val sub = when {
+                        typing && isGroup -> "${vm.people[chat?.typingUid ?: ""]?.name ?: "Кто-то"} печатает…"
+                        typing -> "печатает…"
+                        isGroup -> membersLabel(chat?.members?.size ?: 1)
+                        else -> other.status.ifBlank { "@${other.username}" }
+                    }
+                    Text(
+                        sub,
+                        color = if (typing) C.Accent else C.TextDim, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    )
+                }
             }
             if (!blocked) {
                 IconButton(onClick = { call(false) }) { Icon(Icons.Filled.Call, "Звонок", tint = C.Text) }
@@ -476,7 +517,12 @@ private fun ConversationScreen(vm: MainVm, chatId: String, other: Profile) {
                         menu = false
                         vm.open(Screen.Wallpaper(chatId))
                     })
-                    if (chat?.blockedByMe == true) {
+                    if (isGroup) {
+                        DropdownMenuItem(text = { Text("Участники и настройки") }, onClick = {
+                            menu = false
+                            vm.open(Screen.GroupInfo(chatId))
+                        })
+                    } else if (chat?.blockedByMe == true) {
                         DropdownMenuItem(text = { Text("Разблокировать") }, onClick = {
                             menu = false
                             vm.setBlocked(chatId, false)
@@ -487,11 +533,26 @@ private fun ConversationScreen(vm: MainVm, chatId: String, other: Profile) {
                             confirmBlock = true
                         })
                     }
-                    DropdownMenuItem(text = { Text("Пожаловаться", color = C.Bad) }, onClick = {
+                    if (!isGroup) DropdownMenuItem(text = { Text("Пожаловаться", color = C.Bad) }, onClick = {
                         menu = false
                         reporting = true
                     })
                 }
+            }
+        }
+        if (isGroup && chat?.callId != null && com.revgiler.messenger.App.activeCallId != chat.callId) {
+            Row(
+                Modifier.fillMaxWidth().background(Color(0xFF30A46C)).clickable { vm.joinGroupCall(chat) }
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(if (chat.callVideo) Icons.Filled.Videocam else Icons.Filled.Call, null, tint = Color.White)
+                Spacer(Modifier.width(10.dp))
+                Text(
+                    if (chat.callVideo) "Идёт групповой видеозвонок" else "Идёт групповой звонок",
+                    color = Color.White, fontSize = 15.sp, modifier = Modifier.weight(1f),
+                )
+                Text("Присоединиться", color = Color.White, fontWeight = FontWeight.Bold)
             }
         }
         Box(Modifier.weight(1f).fillMaxWidth()) {
@@ -507,7 +568,11 @@ private fun ConversationScreen(vm: MainVm, chatId: String, other: Profile) {
                     val prev = msgs.getOrNull(i - 1)
                     Column(Modifier.fillMaxWidth()) {
                         if (prev == null || !sameDay(prev.at, m.at)) DayLabel(m.at)
-                        Bubble(m, chatId, if (m.fromMe && m.type != "call" && !m.pending) chat?.statusOf(m.at) ?: Delivery.SENT else null)
+                        // в группе подписываем чужие сообщения именем (кроме подряд идущих от того же человека)
+                        val author = if (isGroup && !m.fromMe && (prev == null || prev.fromUid != m.fromUid || !sameDay(prev.at, m.at))) {
+                            vm.people[m.fromUid]?.name ?: "Участник"
+                        } else null
+                        Bubble(m, chatId, if (m.fromMe && m.type != "call" && !m.pending) chat?.statusOf(m.at) ?: Delivery.SENT else null, author, m.fromUid)
                     }
                 }
             }
@@ -647,7 +712,7 @@ private val REPORT_REASONS = listOf(
 )
 
 @Composable
-private fun ReportDialog(name: String, onDismiss: () -> Unit, onSend: (String, String) -> Unit) {
+internal fun ReportDialog(name: String, onDismiss: () -> Unit, onSend: (String, String) -> Unit) {
     var reason by remember { mutableStateOf<String?>(null) }
     var comment by remember { mutableStateOf("") }
     AlertDialog(
@@ -693,7 +758,7 @@ private fun ReportDialog(name: String, onDismiss: () -> Unit, onSend: (String, S
 
 /** Галочки: одна — отправлено, две серые — доставлено, две синие — прочитано. */
 @Composable
-private fun Ticks(status: Delivery, size: Dp, tint: Color) {
+internal fun Ticks(status: Delivery, size: Dp, tint: Color) {
     Icon(
         if (status == Delivery.SENT) Icons.Filled.Done else Icons.Filled.DoneAll,
         when (status) {
@@ -717,7 +782,7 @@ private val EMOJI = (
     ).split(" ")
 
 @Composable
-private fun Bubble(m: Message, chatId: String, delivery: Delivery?) {
+private fun Bubble(m: Message, chatId: String, delivery: Delivery?, author: String? = null, authorKey: String = "") {
     val ctx = LocalContext.current
     Row(
         Modifier.fillMaxWidth(),
@@ -735,6 +800,10 @@ private fun Bubble(m: Message, chatId: String, delivery: Delivery?) {
                 )
                 .padding(horizontal = 12.dp, vertical = 8.dp),
         ) {
+            if (author != null) {
+                Text(author, color = authorColor(authorKey), fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                Spacer(Modifier.height(2.dp))
+            }
             when (m.type) {
                 "voice" -> {
                     val id = m.mediaId
@@ -1027,7 +1096,7 @@ private fun SettingsScreen(vm: MainVm, me: Profile, activity: Activity) {
 // ---------------------------------------------------------------- мелочи
 
 @Composable
-private fun fieldColors() = OutlinedTextFieldDefaults.colors(
+internal fun fieldColors() = OutlinedTextFieldDefaults.colors(
     focusedBorderColor = C.Accent,
     unfocusedBorderColor = C.SurfaceHi,
     focusedTextColor = C.Text,
@@ -1055,7 +1124,7 @@ private fun sameDay(a: Long, b: Long): Boolean {
     return ca.get(Calendar.YEAR) == cb.get(Calendar.YEAR) && ca.get(Calendar.DAY_OF_YEAR) == cb.get(Calendar.DAY_OF_YEAR)
 }
 
-private fun shortTime(t: Long): String {
+internal fun shortTime(t: Long): String {
     val now = System.currentTimeMillis()
     return when {
         sameDay(t, now) -> clock(t)

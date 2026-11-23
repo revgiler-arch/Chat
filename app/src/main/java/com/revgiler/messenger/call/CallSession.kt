@@ -252,6 +252,8 @@ class CallSession(
         @Volatile
         private var initialized = false
 
+        fun ensureInitialized(ctx: Context) = initOnce(ctx)
+
         private fun initOnce(ctx: Context) {
             if (initialized) return
             synchronized(this) {

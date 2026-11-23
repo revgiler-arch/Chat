@@ -23,9 +23,22 @@ class PushService : FirebaseMessagingService() {
                 if (App.activeCallId == callId) return
                 Notifier.showIncomingCall(this, callId, title, d["video"] == "1")
             }
-            "cancel" -> d["callId"]?.let { Notifier.clearCall(this, it) }
+            "cancel", "gcancel" -> d["callId"]?.let { Notifier.clearCall(this, it) }
+            "invite" -> Notifier.showInvite(this, chatId, title, d["body"].orEmpty())
+            "gcall" -> {
+                val callId = d["callId"] ?: return
+                if (App.activeCallId == callId) return
+                val who = d["senderName"].orEmpty()
+                Notifier.showIncomingCall(this, callId, if (who.isBlank()) title else "$title · $who", d["video"] == "1", groupChatId = chatId)
+            }
             else -> {
-                Notifier.showMessage(this, chatId, title, d["body"].orEmpty())
+                val group = d["group"] == "1"
+                Notifier.showMessage(
+                    this, chatId, title,
+                    // в группе сервер присылает текст без имени — имя автора идёт отдельно
+                    d["body"].orEmpty(),
+                    sender = if (group) d["senderName"].orEmpty().ifBlank { "Участник" } else null,
+                )
                 // приложение может быть закрыто: ждём, пока отметка «доставлено» уйдёт на сервер
                 runCatching { Repo.markDeliveredNow(chatId)?.let { Tasks.await(it, 8, TimeUnit.SECONDS) } }
             }

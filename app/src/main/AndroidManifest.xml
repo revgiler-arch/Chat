@@ -47,6 +47,16 @@
             android:taskAffinity=".call"
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|smallestScreenSize" />
 
+        <activity
+            android:name=".call.GroupCallActivity"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:excludeFromRecents="true"
+            android:taskAffinity=".gcall"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|smallestScreenSize" />
+
         <!-- ответ и «прочитано» из уведомления -->
         <receiver android:name=".ReplyReceiver" android:exported="false" />
 

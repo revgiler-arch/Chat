@@ -38,6 +38,23 @@ data class Chat(
     val blockedByMe: Boolean = false,
     /** Собеседник заблокировал меня. */
     val blockedByOther: Boolean = false,
+    // ---- группы
+    val isGroup: Boolean = false,
+    /** Название группы. */
+    val name: String = "",
+    val owner: String = "",
+    val members: List<String> = emptyList(),
+    /** Приглашены, но ещё не ответили. */
+    val invited: List<String> = emptyList(),
+    /** Кто написал последнее сообщение (в группе показываем «Имя: текст»). */
+    val lastFromUid: String? = null,
+    /** Кто сейчас печатает (в группе). */
+    val typingUid: String? = null,
+    /** Идущий групповой звонок: id, видео ли, кто начал, когда. */
+    val callId: String? = null,
+    val callVideo: Boolean = false,
+    val callBy: String? = null,
+    val callAt: Long = 0,
 ) {
     val blocked get() = blockedByMe || blockedByOther
 
@@ -65,7 +82,12 @@ data class Message(
     val fileId: String? = null,
     val fileSize: Long = 0,
     val mime: String? = null,
+    /** Автор — нужен в группах, чтобы подписать сообщение именем. */
+    val fromUid: String = "",
 )
+
+/** Приглашение в группу, на которое я ещё не ответил. */
+data class Invite(val chatId: String, val name: String, val fromUid: String?, val membersCount: Int)
 
 class UsernameTaken : Exception("Это имя уже занято")
 
@@ -259,28 +281,60 @@ object Repo {
                 val list = snap?.documents.orEmpty().mapNotNull { d ->
                     @Suppress("UNCHECKED_CAST")
                     val members = d.get("members") as? List<String> ?: return@mapNotNull null
-                    val other = members.firstOrNull { it != me } ?: return@mapNotNull null
                     val lastAt = d.getTimestamp("lastAt")?.toDate()?.time ?: 0L
                     val readAt = d.getTimestamp("read.$me")?.toDate()?.time ?: 0L
                     val lastFrom = d.getString("lastFrom")
-                    @Suppress("UNCHECKED_CAST")
-                    val blockedBy = d.get("blockedBy") as? List<String> ?: emptyList()
                     fun stamp(field: String) =
                         d.getTimestamp("$field", DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)?.toDate()?.time ?: 0L
-                    Chat(
-                        id = d.id,
-                        otherUid = other,
-                        lastText = d.getString("lastText").orEmpty(),
-                        lastAt = lastAt,
-                        lastFromMe = lastFrom == me,
-                        unread = lastFrom != null && lastFrom != me && readAt < lastAt,
-                        otherDeliveredAt = stamp("delivered.$other"),
-                        otherReadAt = stamp("read.$other"),
-                        otherTypingAt = stamp("typing.$other"),
-                        myDeliveredAt = stamp("delivered.$me"),
-                        blockedByMe = me in blockedBy,
-                        blockedByOther = other in blockedBy,
-                    )
+                    if (d.getString("type") == "group") {
+                        val others = members.filter { it != me }
+                        // в группе «доставлено/прочитано» — когда дошло до всех
+                        fun minOf(field: String) = if (others.isEmpty()) 0L else others.minOf { stamp("$field.$it") }
+                        val typer = others.maxByOrNull { stamp("typing.$it") }
+                        val invited = (d.get("invited") as? List<*>)?.filterIsInstance<String>() ?: emptyList()
+                        Chat(
+                            id = d.id,
+                            otherUid = "",
+                            lastText = d.getString("lastText").orEmpty(),
+                            lastAt = lastAt,
+                            lastFromMe = lastFrom == me,
+                            unread = lastFrom != null && lastFrom != me && readAt < lastAt,
+                            otherDeliveredAt = minOf("delivered"),
+                            otherReadAt = minOf("read"),
+                            otherTypingAt = typer?.let { stamp("typing.$it") } ?: 0L,
+                            myDeliveredAt = stamp("delivered.$me"),
+                            isGroup = true,
+                            name = d.getString("name").orEmpty().ifBlank { "Группа" },
+                            owner = d.getString("owner").orEmpty(),
+                            members = members,
+                            invited = invited,
+                            lastFromUid = lastFrom,
+                            typingUid = typer,
+                            callId = d.getString("call.id"),
+                            callVideo = d.getBoolean("call.video") == true,
+                            callBy = d.getString("call.by"),
+                            callAt = stamp("call.at"),
+                        )
+                    } else {
+                        val other = members.firstOrNull { it != me } ?: return@mapNotNull null
+                        @Suppress("UNCHECKED_CAST")
+                        val blockedBy = d.get("blockedBy") as? List<String> ?: emptyList()
+                        Chat(
+                            id = d.id,
+                            otherUid = other,
+                            lastText = d.getString("lastText").orEmpty(),
+                            lastAt = lastAt,
+                            lastFromMe = lastFrom == me,
+                            unread = lastFrom != null && lastFrom != me && readAt < lastAt,
+                            otherDeliveredAt = stamp("delivered.$other"),
+                            otherReadAt = stamp("read.$other"),
+                            otherTypingAt = stamp("typing.$other"),
+                            myDeliveredAt = stamp("delivered.$me"),
+                            blockedByMe = me in blockedBy,
+                            blockedByOther = other in blockedBy,
+                            lastFromUid = lastFrom,
+                        )
+                    }
                 }.sortedByDescending { it.lastAt }
                 trySend(list)
             }
@@ -300,6 +354,7 @@ object Repo {
                     Message(
                         id = d.id,
                         fromMe = d.getString("from") == me,
+                        fromUid = d.getString("from").orEmpty(),
                         text = d.getString("text").orEmpty(),
                         type = d.getString("type") ?: "text",
                         mediaId = d.getString("mediaId"),
@@ -406,9 +461,10 @@ object Repo {
     }
 
     /** Запись о звонке в переписке («Исходящий звонок, 3 мин»). */
-    fun logCall(chatId: String, video: Boolean, durationMs: Long, missed: Boolean) {
+    fun logCall(chatId: String, video: Boolean, durationMs: Long, missed: Boolean, group: Boolean = false) {
         val me = uid ?: return
         val text = when {
+            group -> if (video) "Групповой видеозвонок" else "Групповой звонок"
             missed -> if (video) "Видеозвонок без ответа" else "Звонок без ответа"
             else -> if (video) "Видеозвонок" else "Звонок"
         }
@@ -451,6 +507,118 @@ object Repo {
         db.collection("chats").document(chatId)
             .set(mapOf("typing" to mapOf(me to FieldValue.serverTimestamp())), SetOptions.merge())
     }
+
+    // ---------------------------------------------------------------- группы
+
+    /**
+     * Новая группа: я — владелец и единственный участник, остальные получают приглашение
+     * и сами решают, вступать или нет.
+     */
+    suspend fun createGroup(name: String, invitees: List<String>): String {
+        val me = uid ?: error("Не выполнен вход")
+        val ref = db.collection("chats").document("g_" + db.collection("chats").document().id)
+        val invited = invitees.filter { it != me }.distinct().take(49)
+        ref.set(
+            mapOf(
+                "type" to "group",
+                "name" to name.trim().take(50).ifBlank { "Группа" },
+                "owner" to me,
+                "members" to listOf(me),
+                "invited" to invited,
+                "invitedBy" to invited.associateWith { me },
+                "createdAt" to FieldValue.serverTimestamp(),
+                "lastText" to "Группа создана",
+                "lastFrom" to me,
+                "lastAt" to FieldValue.serverTimestamp(),
+            ),
+        ).await()
+        if (invited.isNotEmpty()) Push.notify(ref.id, kind = "invite")
+        return ref.id
+    }
+
+    /** Приглашения, на которые я ещё не ответил. */
+    fun invites(): Flow<List<Invite>> = callbackFlow {
+        val me = uid ?: run { close(); return@callbackFlow }
+        val reg = db.collection("chats").whereArrayContains("invited", me)
+            .addSnapshotListener { snap, err ->
+                if (err != null) { close(err); return@addSnapshotListener }
+                trySend(
+                    snap?.documents.orEmpty().map { d ->
+                        Invite(
+                            chatId = d.id,
+                            name = d.getString("name").orEmpty().ifBlank { "Группа" },
+                            fromUid = d.getString("invitedBy.$me") ?: d.getString("owner"),
+                            membersCount = (d.get("members") as? List<*>)?.size ?: 0,
+                        )
+                    },
+                )
+            }
+        awaitClose { reg.remove() }
+    }
+
+    suspend fun acceptInvite(chatId: String) {
+        val me = uid ?: return
+        db.collection("chats").document(chatId).update(
+            mapOf(
+                "invited" to FieldValue.arrayRemove(me),
+                "members" to FieldValue.arrayUnion(me),
+                "read" to mapOf(me to FieldValue.serverTimestamp()),
+            ),
+        ).await()
+    }
+
+    suspend fun declineInvite(chatId: String) {
+        val me = uid ?: return
+        db.collection("chats").document(chatId).update("invited", FieldValue.arrayRemove(me)).await()
+    }
+
+    /** Владелец приглашает ещё людей. */
+    suspend fun inviteToGroup(chatId: String, uids: List<String>) {
+        val me = uid ?: return
+        if (uids.isEmpty()) return
+        db.collection("chats").document(chatId).update(
+            buildMap<String, Any> {
+                put("invited", FieldValue.arrayUnion(*uids.toTypedArray()))
+                uids.forEach { put("invitedBy.$it", me) }
+            },
+        ).await()
+        Push.notify(chatId, kind = "invite")
+    }
+
+    /** Владелец отменяет приглашение. */
+    suspend fun cancelInvite(chatId: String, who: String) {
+        db.collection("chats").document(chatId).update("invited", FieldValue.arrayRemove(who)).await()
+    }
+
+    /** Владелец удаляет участника. */
+    suspend fun removeMember(chatId: String, who: String) {
+        db.collection("chats").document(chatId).update("members", FieldValue.arrayRemove(who)).await()
+    }
+
+    suspend fun renameGroup(chatId: String, name: String) {
+        val clean = name.trim().take(50)
+        if (clean.isEmpty()) return
+        db.collection("chats").document(chatId).update("name", clean).await()
+    }
+
+    /**
+     * Выйти из группы. Владелец передаёт группу следующему участнику;
+     * если уходит последний — группа удаляется.
+     */
+    suspend fun leaveGroup(chat: Chat) {
+        val me = uid ?: return
+        val ref = db.collection("chats").document(chat.id)
+        val rest = chat.members.filter { it != me }
+        when {
+            rest.isEmpty() -> ref.delete().await()
+            chat.owner == me -> ref.update(mapOf("members" to FieldValue.arrayRemove(me), "owner" to rest.first())).await()
+            else -> ref.update("members", FieldValue.arrayRemove(me)).await()
+        }
+    }
+
+    /** Название группы (для открытия из уведомления, пока список чатов не загрузился). */
+    suspend fun groupName(chatId: String): String? =
+        runCatching { db.collection("chats").document(chatId).get().await().getString("name") }.getOrNull()
 
     /** Жалоба на собеседника. Читать жалобы может только владелец проекта (консоль Firebase). */
     suspend fun report(chatId: String, reported: String, reason: String, comment: String, evidence: List<Message>) {

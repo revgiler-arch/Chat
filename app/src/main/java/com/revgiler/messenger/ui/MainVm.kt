@@ -20,6 +20,7 @@ import com.revgiler.messenger.R
 import com.revgiler.messenger.call.CallActivity
 import com.revgiler.messenger.data.CallSignal
 import com.revgiler.messenger.data.Chat
+import com.revgiler.messenger.data.Invite
 import com.revgiler.messenger.data.Message
 import com.revgiler.messenger.data.Profile
 import com.revgiler.messenger.data.Repo
@@ -45,6 +46,8 @@ sealed interface Screen {
     data object NewChat : Screen
     data object Settings : Screen
     data class Conversation(val chatId: String, val other: Profile) : Screen
+    data object NewGroup : Screen
+    data class GroupInfo(val chatId: String) : Screen
     /** Обои: chatId == null — общие для всех чатов. */
     data class Wallpaper(val chatId: String?) : Screen
 }
@@ -76,6 +79,11 @@ class MainVm(app: Application) : AndroidViewModel(app) {
     private var chatsJob: Job? = null
     private var messagesJob: Job? = null
     private var callsJob: Job? = null
+    private var invitesJob: Job? = null
+
+    /** Приглашения в группы, на которые я ещё не ответил. */
+    var invites by mutableStateOf<List<Invite>>(emptyList())
+        private set
     /** Чат из уведомления, нажатого до того, как загрузился профиль. */
     private var pendingChatId: String? = null
 
@@ -218,6 +226,7 @@ class MainVm(app: Application) : AndroidViewModel(app) {
     }
 
     private fun stopListeners() {
+        invitesJob?.cancel()
         chatsJob?.cancel()
         messagesJob?.cancel()
         callsJob?.cancel()
@@ -273,20 +282,62 @@ class MainVm(app: Application) : AndroidViewModel(app) {
 
     // ---------------------------------------------------------------- чаты
 
+    private fun startInvites() {
+        invitesJob?.cancel()
+        invitesJob = viewModelScope.launch {
+            Repo.invites().catch { }.collect { list ->
+                invites = list
+                loadPeople(list.mapNotNull { it.fromUid })
+            }
+        }
+    }
+
     private fun startChats() {
+        startInvites()
         chatsJob?.cancel()
         chatsJob = viewModelScope.launch {
             Repo.chats()
                 .catch { error = "Чаты не загрузились: ${it.message}" }
                 .collect { list ->
                     chats = list
-                    loadPeople(list.map { it.otherUid })
+                    loadPeople(list.flatMap { if (it.isGroup) it.members + it.invited else listOf(it.otherUid) })
                     updateTyping(list)
+                    ringGroupCalls(list)
                     // чат обновился на этом телефоне — значит, сообщение дошло
                     list.filter { !it.lastFromMe && it.lastAt > it.myDeliveredAt }
                         .forEach { Repo.markDelivered(it.id, it.lastAt) }
                 }
         }
+    }
+
+    private val seenGroupCalls = HashSet<String>()
+    private var groupCallsPrimed = false
+
+    /** В группе начали звонок, пока приложение открыто, — показываем входящий (push может прийти позже). */
+    private fun ringGroupCalls(list: List<Chat>) {
+        val me = Repo.uid ?: return
+        val now = System.currentTimeMillis()
+        list.filter { it.isGroup && it.callId != null }.forEach { c ->
+            val id = c.callId!!
+            if (!seenGroupCalls.add(id) || !groupCallsPrimed) return@forEach
+            if (c.callBy == me || App.activeCallId == id || App.activeCallId != null) return@forEach
+            if (kotlin.math.abs(now - c.callAt) > 50_000) return@forEach
+            val ctx = getApplication<Application>()
+            runCatching {
+                ctx.startActivity(com.revgiler.messenger.call.GroupCallActivity.incoming(ctx, c.id, id, c.name, c.callVideo))
+            }.onFailure { Notifier.showIncomingCall(ctx, id, c.name, c.callVideo, groupChatId = c.id) }
+        }
+        // первый снимок после запуска — только запоминаем, не звоним
+        groupCallsPrimed = true
+    }
+
+    fun joinGroupCall(chat: Chat) {
+        val id = chat.callId ?: return
+        val ctx = getApplication<Application>()
+        ctx.startActivity(
+            com.revgiler.messenger.call.GroupCallActivity.join(ctx, chat.id, id, chat.name, chat.callVideo)
+                .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK),
+        )
     }
 
     private fun updateTyping(list: List<Chat>) {
@@ -328,7 +379,7 @@ class MainVm(app: Application) : AndroidViewModel(app) {
         getApplication<Application>().getSystemService(android.net.ConnectivityManager::class.java)?.activeNetwork != null
 
     private fun loadPeople(uids: List<String>) {
-        val missing = uids.filter { it !in people }
+        val missing = uids.filter { it.isNotEmpty() && it !in people }.distinct()
         if (missing.isEmpty()) return
         viewModelScope.launch {
             val loaded = missing.mapNotNull { runCatching { Repo.profile(it) }.getOrNull() }
@@ -375,6 +426,14 @@ class MainVm(app: Application) : AndroidViewModel(app) {
         val me = Repo.uid ?: return
         if (auth !is AuthState.Ready) { pendingChatId = chatId; return }
         if ((screen as? Screen.Conversation)?.chatId == chatId) return
+        if (chatId.startsWith("g_")) {
+            viewModelScope.launch {
+                val name = chats.firstOrNull { it.id == chatId }?.name ?: Repo.groupName(chatId) ?: return@launch
+                while (stack.size > 1) back()
+                open(Screen.Conversation(chatId, groupProfile(chatId, name)))
+            }
+            return
+        }
         val other = chatId.split("_").firstOrNull { it != me } ?: return
         viewModelScope.launch {
             val p = people[other] ?: runCatching { Repo.profile(other) }.getOrNull() ?: return@launch
@@ -462,6 +521,10 @@ class MainVm(app: Application) : AndroidViewModel(app) {
     }
 
     fun openChat(chat: Chat) {
+        if (chat.isGroup) {
+            open(Screen.Conversation(chat.id, groupProfile(chat.id, chat.name)))
+            return
+        }
         val other = people[chat.otherUid] ?: return
         open(Screen.Conversation(chat.id, other))
     }
@@ -496,11 +559,76 @@ class MainVm(app: Application) : AndroidViewModel(app) {
 
     /** Жалоба на собеседника; к ней прикладываем его последние сообщения. */
     fun report(chatId: String, other: Profile, reason: String, comment: String, onDone: () -> Unit) {
-        val evidence = messages.filter { !it.fromMe }
+        val evidence = messages.filter { it.fromUid == other.uid }
         viewModelScope.launch {
             runCatching { withTimeout(15_000) { Repo.report(chatId, other.uid, reason, comment, evidence) } }
                 .onSuccess { onDone() }
                 .onFailure { error = "Жалоба не отправлена: проверьте интернет" }
+        }
+    }
+
+    // ---------------------------------------------------------------- группы
+
+    /** Найти человека по @username (для приглашения в группу). */
+    fun lookup(username: String, onResult: (Profile?, String?) -> Unit) {
+        val clean = Repo.normalize(username)
+        if (!Repo.isValidUsername(clean)) { onResult(null, "Введите имя, например @ivan_99"); return }
+        viewModelScope.launch {
+            runCatching { Repo.findByUsername(clean) }
+                .onSuccess { p ->
+                    when {
+                        p == null -> onResult(null, "Пользователь @$clean не найден")
+                        p.uid == Repo.uid -> onResult(null, "Это вы :)")
+                        else -> {
+                            people = people + (p.uid to p)
+                            onResult(p, null)
+                        }
+                    }
+                }
+                .onFailure { onResult(null, "Ошибка: ${it.message}") }
+        }
+    }
+
+    fun createGroup(name: String, invitees: List<Profile>) {
+        if (busy) return
+        busy = true
+        viewModelScope.launch {
+            runCatching { withTimeout(15_000) { Repo.createGroup(name, invitees.map { it.uid }) } }
+                .onSuccess { id ->
+                    while (screen is Screen.NewGroup || screen is Screen.NewChat) stack.removeAt(stack.lastIndex)
+                    open(Screen.Conversation(id, groupProfile(id, name.trim().ifBlank { "Группа" })))
+                }
+                .onFailure { error = "Группа не создана: ${it.message}" }
+            busy = false
+        }
+    }
+
+    private fun groupAction(what: String, action: suspend () -> Unit) {
+        viewModelScope.launch {
+            runCatching { withTimeout(15_000) { action() } }
+                .onFailure { error = "$what: проверьте интернет" }
+        }
+    }
+
+    fun acceptInvite(inv: Invite) = groupAction("Не удалось вступить") {
+        Repo.acceptInvite(inv.chatId)
+        Notifier.clearInvite(getApplication(), inv.chatId)
+    }
+
+    fun declineInvite(inv: Invite) = groupAction("Не удалось отклонить") {
+        Repo.declineInvite(inv.chatId)
+        Notifier.clearInvite(getApplication(), inv.chatId)
+    }
+
+    fun inviteToGroup(chatId: String, p: Profile) = groupAction("Приглашение не отправлено") { Repo.inviteToGroup(chatId, listOf(p.uid)) }
+    fun cancelInvite(chatId: String, uid: String) = groupAction("Не удалось отменить") { Repo.cancelInvite(chatId, uid) }
+    fun removeMember(chatId: String, uid: String) = groupAction("Не удалось удалить") { Repo.removeMember(chatId, uid) }
+    fun renameGroup(chatId: String, name: String) = groupAction("Не удалось переименовать") { Repo.renameGroup(chatId, name) }
+
+    fun leaveGroup(chat: Chat) {
+        groupAction("Не удалось выйти") {
+            Repo.leaveGroup(chat)
+            while (stack.size > 1) back()
         }
     }
 
@@ -566,3 +694,6 @@ class MainVm(app: Application) : AndroidViewModel(app) {
         }
     }
 }
+
+/** Группа в шапке чата показывается как «профиль»: имя группы, без @username. */
+fun groupProfile(chatId: String, name: String) = Profile(uid = chatId, username = "", name = name, photo = null)
