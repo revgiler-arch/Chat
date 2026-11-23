@@ -6,7 +6,7 @@
 //
 // Секрет SERVICE_ACCOUNT — JSON сервисного аккаунта Firebase (Настройки проекта → Сервисные аккаунты).
 
-import { privacyPage, deletePage } from "./pages.js";
+import { privacyPage, deletePage, joinPage } from "./pages.js";
 
 const JWKS_URL =
   "https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com";
@@ -19,6 +19,8 @@ export default {
     }
     if (request.method === "GET" && url.pathname === "/privacy") return privacyPage(env);
     if (request.method === "GET" && url.pathname === "/delete-account") return deletePage(env);
+    const joinRoute = url.pathname.match(/^\/join\/(g_[A-Za-z0-9]{10,40})$/);
+    if (request.method === "GET" && joinRoute) return joinPage(joinRoute[1]);
     if (request.method === "GET" && url.pathname === "/turn") {
       try {
         const idToken = (request.headers.get("Authorization") || "").replace(/^Bearer\s+/i, "");
@@ -68,7 +70,9 @@ export default {
       // Кому: в группе — всем остальным участникам; приглашение — только приглашённым (шлёт владелец)
       let recipients;
       if (kind === "invite") {
-        if (!group || str(chat, "owner") !== sender) return json({ error: "only owner invites" }, 403);
+        const canInvite = str(chat, "owner") === sender || arr(chat, "admins").includes(sender)
+          || chat?.fields?.membersInvite?.booleanValue === true;
+        if (!group || !canInvite) return json({ error: "not allowed to invite" }, 403);
         recipients = arr(chat, "invited");
       } else {
         recipients = members.filter((m) => m !== sender);

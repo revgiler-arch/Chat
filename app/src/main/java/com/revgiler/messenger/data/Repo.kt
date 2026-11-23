@@ -43,6 +43,12 @@ data class Chat(
     /** Название группы. */
     val name: String = "",
     val owner: String = "",
+    /** Админы группы (владелец — тоже админ, но в этом списке его нет). */
+    val admins: List<String> = emptyList(),
+    /** Открытая группа: вступить можно по ссылке без приглашения. */
+    val open: Boolean = false,
+    /** Приглашать могут все участники, а не только админы. */
+    val membersInvite: Boolean = false,
     val members: List<String> = emptyList(),
     /** Приглашены, но ещё не ответили. */
     val invited: List<String> = emptyList(),
@@ -57,6 +63,9 @@ data class Chat(
     val callAt: Long = 0,
 ) {
     val blocked get() = blockedByMe || blockedByOther
+
+    fun isAdmin(uid: String?) = uid != null && (uid == owner || uid in admins)
+    fun canInvite(uid: String?) = isAdmin(uid) || (membersInvite && uid in members)
 
     /** Галочки для моего сообщения, отправленного в момент [at]. */
     fun statusOf(at: Long): Delivery = when {
@@ -292,6 +301,7 @@ object Repo {
                         fun minOf(field: String) = if (others.isEmpty()) 0L else others.minOf { stamp("$field.$it") }
                         val typer = others.maxByOrNull { stamp("typing.$it") }
                         val invited = (d.get("invited") as? List<*>)?.filterIsInstance<String>() ?: emptyList()
+                        val admins = (d.get("admins") as? List<*>)?.filterIsInstance<String>() ?: emptyList()
                         Chat(
                             id = d.id,
                             otherUid = "",
@@ -306,6 +316,9 @@ object Repo {
                             isGroup = true,
                             name = d.getString("name").orEmpty().ifBlank { "Группа" },
                             owner = d.getString("owner").orEmpty(),
+                            admins = admins,
+                            open = d.getBoolean("open") == true,
+                            membersInvite = d.getBoolean("membersInvite") == true,
                             members = members,
                             invited = invited,
                             lastFromUid = lastFrom,
@@ -585,14 +598,57 @@ object Repo {
         Push.notify(chatId, kind = "invite")
     }
 
-    /** Владелец отменяет приглашение. */
+    /** Группа по ссылке: что показать перед вступлением. null — нет доступа (закрытая группа). */
+    data class GroupPreview(val id: String, val name: String, val membersCount: Int, val open: Boolean, val member: Boolean, val invited: Boolean)
+
+    suspend fun groupPreview(chatId: String): GroupPreview? {
+        val me = uid ?: return null
+        val d = runCatching { db.collection("chats").document(chatId).get().await() }.getOrNull() ?: return null
+        if (!d.exists() || d.getString("type") != "group") return null
+        val members = (d.get("members") as? List<*>)?.filterIsInstance<String>().orEmpty()
+        val invited = (d.get("invited") as? List<*>)?.filterIsInstance<String>().orEmpty()
+        return GroupPreview(
+            chatId, d.getString("name").orEmpty().ifBlank { "Группа" }, members.size,
+            d.getBoolean("open") == true, me in members, me in invited,
+        )
+    }
+
+    /** Вступить в открытую группу самому. */
+    suspend fun joinOpenGroup(chatId: String) {
+        val me = uid ?: return
+        db.collection("chats").document(chatId).update(
+            mapOf(
+                "members" to FieldValue.arrayUnion(me),
+                "invited" to FieldValue.arrayRemove(me),
+                "read" to mapOf(me to FieldValue.serverTimestamp()),
+            ),
+        ).await()
+    }
+
+    /** Настройки группы (меняют админы). */
+    suspend fun setGroupSettings(chatId: String, open: Boolean? = null, membersInvite: Boolean? = null) {
+        val fields = buildMap<String, Any> {
+            open?.let { put("open", it) }
+            membersInvite?.let { put("membersInvite", it) }
+        }
+        if (fields.isNotEmpty()) db.collection("chats").document(chatId).update(fields).await()
+    }
+
+    /** Назначить или снять админа (только владелец). */
+    suspend fun setAdmin(chatId: String, who: String, admin: Boolean) {
+        db.collection("chats").document(chatId)
+            .update("admins", if (admin) FieldValue.arrayUnion(who) else FieldValue.arrayRemove(who)).await()
+    }
+
+    /** Отменить приглашение (админ). */
     suspend fun cancelInvite(chatId: String, who: String) {
         db.collection("chats").document(chatId).update("invited", FieldValue.arrayRemove(who)).await()
     }
 
-    /** Владелец удаляет участника. */
+    /** Админ удаляет участника (вместе с ролью админа, если была). */
     suspend fun removeMember(chatId: String, who: String) {
-        db.collection("chats").document(chatId).update("members", FieldValue.arrayRemove(who)).await()
+        db.collection("chats").document(chatId)
+            .update(mapOf("members" to FieldValue.arrayRemove(who), "admins" to FieldValue.arrayRemove(who))).await()
     }
 
     suspend fun renameGroup(chatId: String, name: String) {
@@ -611,8 +667,11 @@ object Repo {
         val rest = chat.members.filter { it != me }
         when {
             rest.isEmpty() -> ref.delete().await()
-            chat.owner == me -> ref.update(mapOf("members" to FieldValue.arrayRemove(me), "owner" to rest.first())).await()
-            else -> ref.update("members", FieldValue.arrayRemove(me)).await()
+            // владелец передаёт группу админу, а если админов нет — первому участнику
+            chat.owner == me -> ref.update(
+                mapOf("members" to FieldValue.arrayRemove(me), "owner" to (rest.firstOrNull { it in chat.admins } ?: rest.first())),
+            ).await()
+            else -> ref.update(mapOf("members" to FieldValue.arrayRemove(me), "admins" to FieldValue.arrayRemove(me))).await()
         }
     }
 

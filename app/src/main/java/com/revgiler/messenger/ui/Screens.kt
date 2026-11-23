@@ -152,6 +152,7 @@ fun MessengerApp(vm: MainVm, activity: Activity) {
                     is Screen.Wallpaper -> WallpaperScreen(s.chatId) { vm.back() }
                 }
             }
+            vm.joinPreview?.let { JoinDialog(it, vm) }
             vm.error?.let { ErrorBar(it) { vm.error = null } }
         }
     }

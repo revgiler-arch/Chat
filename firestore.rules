@@ -34,8 +34,11 @@ service cloud.firestore {
     function isGroup(d) { return d.get('type', 'direct') == 'group'; }
     function setOf(d, f) { return d.get(f, []).toSet(); }
 
-    // Группы: владелец меняет название, приглашает и удаляет участников; вступить можно
-    // только самому, приняв приглашение (напрямую добавить человека в участники нельзя)
+    // Группы. Роли: владелец (owner) и админы (admins). Настройки:
+    //   open          — открытая группа: вступить может любой, сам (по ссылке)
+    //   membersInvite — приглашать могут все участники, а не только админы
+    // Напрямую добавить человека в участники нельзя никому: только он сам, приняв приглашение
+    // или вступив в открытую группу.
     function groupUpdate() {
       let d0 = resource.data;
       let d1 = request.resource.data;
@@ -44,15 +47,31 @@ service cloud.firestore {
       let left = setOf(d0, 'members').difference(setOf(d1, 'members'));
       let uninvited = setOf(d0, 'invited').difference(setOf(d1, 'invited'));
       let newInvites = setOf(d1, 'invited').difference(setOf(d0, 'invited'));
+      let isOwner = me() == d0.owner;
+      let isAdmin = isOwner || me() in d0.get('admins', []);
+      let sizeOk = d1.members.size() + d1.get('invited', []).size() <= 50;
       return d1.get('type', '') == 'group' && (
-        // обычная жизнь чата: последнее сообщение, прочитано, печатает…
-        (me() in d0.members && !changed.hasAny(['type', 'owner', 'members', 'invited', 'invitedBy', 'name']))
-        // владелец: название, приглашения, удаление участников
-        || (me() == d0.owner && d1.owner == d0.owner && me() in d1.members
-            && joined.size() == 0
-            && d1.members.size() + d1.get('invited', []).size() <= 50
+        // обычная жизнь чата: последнее сообщение, прочитано, печатает, отметка звонка
+        (me() in d0.members
+          && !changed.hasAny(['type', 'owner', 'admins', 'members', 'invited', 'invitedBy', 'name', 'open', 'membersInvite']))
+        // владелец и админы: название, настройки, приглашения, удаление участников
+        || (isAdmin && me() in d1.members && d1.owner == d0.owner
+            && joined.size() == 0 && sizeOk
             && !setOf(d1, 'invited').hasAny(d1.members)
-            && d1.name is string && d1.name.size() >= 1 && d1.name.size() <= 50)
+            && setOf(d1, 'admins').difference(setOf(d1, 'members')).size() == 0
+            && d1.name is string && d1.name.size() >= 1 && d1.name.size() <= 50
+            // админов назначает и снимает только владелец; админ не может удалить владельца или другого админа
+            && (isOwner || (setOf(d1, 'admins') == setOf(d0, 'admins')
+                            && !left.hasAny([d0.owner]) && !left.hasAny(d0.get('admins', [])))))
+        // участник приглашает, если это разрешено в настройках (отменять чужие приглашения не может)
+        || (me() in d0.members && d0.get('membersInvite', false) == true
+            && changed.hasOnly(['invited', 'invitedBy'])
+            && uninvited.size() == 0 && !newInvites.hasAny(d1.members) && sizeOk)
+        // вступить в открытую группу самому
+        || (d0.get('open', false) == true && !(me() in d0.members)
+            && changed.hasOnly(['members', 'invited', 'read'])
+            && joined == [me()].toSet() && left.size() == 0
+            && newInvites.size() == 0 && uninvited.difference([me()].toSet()).size() == 0 && sizeOk)
         // принять приглашение: только себя, из invited в members
         || (me() in d0.get('invited', []) && changed.hasOnly(['members', 'invited', 'read'])
             && uninvited == [me()].toSet() && newInvites.size() == 0
@@ -61,16 +80,19 @@ service cloud.firestore {
         || (me() in d0.get('invited', []) && changed.hasOnly(['invited'])
             && uninvited == [me()].toSet() && newInvites.size() == 0)
         // выйти из группы; владелец при выходе передаёт группу другому участнику
-        || (me() in d0.members && changed.hasOnly(['members', 'owner'])
+        || (me() in d0.members && changed.hasOnly(['members', 'owner', 'admins'])
             && left == [me()].toSet() && joined.size() == 0
-            && (d0.owner != me() ? d1.owner == d0.owner : d1.owner in d1.members))
+            && setOf(d0, 'admins').difference(setOf(d1, 'admins')).difference([me()].toSet()).size() == 0
+            && setOf(d1, 'admins').difference(setOf(d0, 'admins')).size() == 0
+            && (isOwner ? d1.owner in d1.members : d1.owner == d0.owner))
       );
     }
 
     // Чаты: на двоих и группы. Доступ — участникам; приглашённые видят только саму группу
     match /chats/{chatId} {
       allow read: if signedIn()
-        && (me() in resource.data.members || me() in resource.data.invited);
+        && (me() in resource.data.members || me() in resource.data.invited
+            || resource.data.open == true);
       allow create: if signedIn() && (
         (!isGroup(request.resource.data)
           && me() in request.resource.data.members

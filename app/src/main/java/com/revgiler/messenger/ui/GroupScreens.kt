@@ -29,6 +29,7 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PersonAdd
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -263,6 +264,8 @@ internal fun GroupInfoScreen(vm: MainVm, chatId: String, me: Profile) {
         return
     }
     val owner = chat.owner == me.uid
+    val admin = chat.isAdmin(me.uid)
+    val canInvite = chat.canInvite(me.uid)
     var renaming by remember { mutableStateOf(false) }
     var inviting by remember { mutableStateOf(false) }
     var confirmLeave by remember { mutableStateOf(false) }
@@ -283,13 +286,35 @@ internal fun GroupInfoScreen(vm: MainVm, chatId: String, me: Profile) {
                 }
                 Text(membersLabel(chat.members.size), color = C.TextDim, fontSize = 14.sp)
             }
-            if (owner) {
+            if (canInvite) {
                 OutlinedButton(onClick = { inviting = true }, modifier = Modifier.fillMaxWidth()) {
                     Icon(Icons.Filled.PersonAdd, null, Modifier.size(18.dp))
                     Spacer(Modifier.width(8.dp))
                     Text("Пригласить участников")
                 }
-                Spacer(Modifier.height(12.dp))
+                Spacer(Modifier.height(8.dp))
+            }
+            if (chat.open) {
+                OutlinedButton(onClick = { shareGroupLink(ctx, chat) }, modifier = Modifier.fillMaxWidth()) {
+                    Icon(Icons.Filled.Share, null, Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Поделиться ссылкой на группу")
+                }
+                Spacer(Modifier.height(8.dp))
+            }
+            if (admin) {
+                Text("Настройки", color = C.Text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 10.dp, bottom = 2.dp))
+                SettingSwitch(
+                    "Открытая группа",
+                    "Вступить можно по ссылке без приглашения",
+                    chat.open,
+                ) { vm.setGroupOpen(chatId, it) }
+                SettingSwitch(
+                    "Участники могут приглашать",
+                    if (chat.membersInvite) "Приглашать может любой участник" else "Приглашают только админы",
+                    chat.membersInvite,
+                ) { vm.setMembersInvite(chatId, it) }
+                Spacer(Modifier.height(8.dp))
             }
             Text("Участники", color = C.Text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(vertical = 6.dp))
         }
@@ -298,9 +323,14 @@ internal fun GroupInfoScreen(vm: MainVm, chatId: String, me: Profile) {
         items(members, key = { "m/$it" }) { uid ->
             val p = vm.people[uid]
             val isMe = uid == me.uid
+            val role = when {
+                uid == chat.owner -> "владелец"
+                uid in chat.admins -> "админ"
+                else -> null
+            }
             PersonRow(
                 if (isMe) me else p,
-                listOfNotNull(if (uid == chat.owner) "владелец" else null, if (isMe) "вы" else null).joinToString(", ").ifEmpty { null },
+                listOfNotNull(role, if (isMe) "вы" else null).joinToString(", ").ifEmpty { null },
             ) {
                 if (!isMe && p != null) {
                     var menu by remember { mutableStateOf(false) }
@@ -311,7 +341,15 @@ internal fun GroupInfoScreen(vm: MainVm, chatId: String, me: Profile) {
                                 menu = false
                                 vm.startChat(p)
                             })
-                            if (owner) DropdownMenuItem(text = { Text("Удалить из группы", color = C.Bad) }, onClick = {
+                            if (owner && uid != chat.owner) {
+                                val isAdm = uid in chat.admins
+                                DropdownMenuItem(text = { Text(if (isAdm) "Снять админа" else "Сделать админом") }, onClick = {
+                                    menu = false
+                                    vm.setAdmin(chatId, uid, !isAdm)
+                                })
+                            }
+                            // админ удаляет обычных участников; владелец — любого
+                            if (owner || (admin && role == null)) DropdownMenuItem(text = { Text("Удалить из группы", color = C.Bad) }, onClick = {
                                 menu = false
                                 vm.removeMember(chatId, uid)
                             })
@@ -334,7 +372,7 @@ internal fun GroupInfoScreen(vm: MainVm, chatId: String, me: Profile) {
             }
             items(chat.invited, key = { "i/$it" }) { uid ->
                 PersonRow(vm.people[uid], "приглашён") {
-                    if (owner) TextButton(onClick = { vm.cancelInvite(chatId, uid) }) { Text("Отменить", color = C.TextDim) }
+                    if (admin) TextButton(onClick = { vm.cancelInvite(chatId, uid) }) { Text("Отменить", color = C.TextDim) }
                 }
             }
         }
@@ -394,7 +432,7 @@ internal fun GroupInfoScreen(vm: MainVm, chatId: String, me: Profile) {
                 Text(
                     when {
                         alone -> "Вы последний участник — группа будет удалена."
-                        owner -> "Вы владелец: группа перейдёт к другому участнику."
+                        owner -> "Вы владелец: группа перейдёт ${if (chat.admins.any { it != me.uid }) "админу" else "другому участнику"}."
                         else -> "Вернуться можно будет только по новому приглашению."
                     },
                     color = C.TextDim, fontSize = 14.sp,
@@ -421,4 +459,43 @@ internal fun GroupInfoScreen(vm: MainVm, chatId: String, me: Profile) {
             },
         )
     }
+}
+
+@Composable
+private fun SettingSwitch(title: String, subtitle: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable { onChange(!checked) }.padding(vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(title, color = C.Text, fontSize = 15.sp)
+            Text(subtitle, color = C.TextDim, fontSize = 13.sp)
+        }
+        androidx.compose.material3.Switch(checked = checked, onCheckedChange = onChange)
+    }
+}
+
+const val JOIN_URL = "https://chat-push.revgiler.workers.dev/join/"
+
+/** Ссылка на открытую группу — через системное «Поделиться». */
+fun shareGroupLink(ctx: android.content.Context, chat: Chat) {
+    val send = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+        type = "text/plain"
+        putExtra(android.content.Intent.EXTRA_TEXT, "Вступай в группу «${chat.name}» в U chat: $JOIN_URL${chat.id}")
+    }
+    ctx.startActivity(android.content.Intent.createChooser(send, "Ссылка на группу").addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
+}
+
+/** Открыли ссылку на группу: показать, куда вступаем. */
+@Composable
+internal fun JoinDialog(p: com.revgiler.messenger.data.Repo.GroupPreview, vm: MainVm) {
+    AlertDialog(
+        onDismissRequest = { vm.dismissJoin() },
+        containerColor = C.Surface,
+        icon = { GroupAvatar(p.name, 56.dp) },
+        title = { Text("Вступить в «${p.name}»?", color = C.Text) },
+        text = { Text(membersLabel(p.membersCount), color = C.TextDim) },
+        confirmButton = { TextButton(onClick = { vm.confirmJoin() }) { Text("Вступить", color = C.Accent) } },
+        dismissButton = { TextButton(onClick = { vm.dismissJoin() }) { Text("Отмена", color = C.Text) } },
+    )
 }

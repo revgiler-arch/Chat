@@ -46,6 +46,12 @@ class MainActivity : ComponentActivity() {
 
     /** Нажали на уведомление о сообщении — открываем этот чат. */
     private fun handle(intent: Intent?) {
+        // ссылка-приглашение в группу: uchat://join/g_…
+        intent?.data?.takeIf { it.scheme == "uchat" && it.host == "join" }?.lastPathSegment?.let { id ->
+            intent.data = null
+            if (id.matches(Regex("g_[A-Za-z0-9]{10,40}"))) vm.openJoinLink(id)
+            return
+        }
         val chatId = intent?.getStringExtra(Notifier.EXTRA_CHAT_ID) ?: return
         intent.removeExtra(Notifier.EXTRA_CHAT_ID)
         vm.openChatById(chatId)

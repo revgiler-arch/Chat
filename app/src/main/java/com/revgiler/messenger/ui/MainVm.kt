@@ -81,6 +81,11 @@ class MainVm(app: Application) : AndroidViewModel(app) {
     private var callsJob: Job? = null
     private var invitesJob: Job? = null
 
+    /** Группа, открытая по ссылке: показываем «Вступить?». */
+    var joinPreview by mutableStateOf<Repo.GroupPreview?>(null)
+        private set
+    private var pendingJoinId: String? = null
+
     /** Приглашения в группы, на которые я ещё не ответил. */
     var invites by mutableStateOf<List<Invite>>(emptyList())
         private set
@@ -130,6 +135,7 @@ class MainVm(app: Application) : AndroidViewModel(app) {
                         startIncomingCalls()
                         launch { runCatching { Repo.registerPush() } }
                         pendingChatId?.let { pendingChatId = null; openChatById(it) }
+                        pendingJoinId?.let { pendingJoinId = null; openJoinLink(it) }
                     }
                 }
                 .onFailure {
@@ -619,6 +625,35 @@ class MainVm(app: Application) : AndroidViewModel(app) {
         Repo.declineInvite(inv.chatId)
         Notifier.clearInvite(getApplication(), inv.chatId)
     }
+
+    /** Открыли ссылку на группу. */
+    fun openJoinLink(chatId: String) {
+        if (auth !is AuthState.Ready) { pendingJoinId = chatId; return }
+        viewModelScope.launch {
+            val p = Repo.groupPreview(chatId)
+            when {
+                p == null -> error = "Группа закрыта или удалена — вступить можно только по приглашению"
+                p.member -> openChatById(chatId)
+                else -> joinPreview = p
+            }
+        }
+    }
+
+    fun dismissJoin() { joinPreview = null }
+
+    fun confirmJoin() {
+        val p = joinPreview ?: return
+        joinPreview = null
+        groupAction("Не удалось вступить") {
+            if (p.invited) Repo.acceptInvite(p.id) else Repo.joinOpenGroup(p.id)
+            while (stack.size > 1) back()
+            open(Screen.Conversation(p.id, groupProfile(p.id, p.name)))
+        }
+    }
+
+    fun setGroupOpen(chatId: String, open: Boolean) = groupAction("Настройка не сохранена") { Repo.setGroupSettings(chatId, open = open) }
+    fun setMembersInvite(chatId: String, on: Boolean) = groupAction("Настройка не сохранена") { Repo.setGroupSettings(chatId, membersInvite = on) }
+    fun setAdmin(chatId: String, uid: String, admin: Boolean) = groupAction("Не получилось") { Repo.setAdmin(chatId, uid, admin) }
 
     fun inviteToGroup(chatId: String, p: Profile) = groupAction("Приглашение не отправлено") { Repo.inviteToGroup(chatId, listOf(p.uid)) }
     fun cancelInvite(chatId: String, uid: String) = groupAction("Не удалось отменить") { Repo.cancelInvite(chatId, uid) }

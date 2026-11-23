@@ -190,6 +190,17 @@ $("del").onclick = async () => {
 </script>`));
 }
 
+/** Ссылка-приглашение в открытую группу: открывает приложение, а если его нет — Google Play. */
+export function joinPage(groupId) {
+  const play = "https://play.google.com/store/apps/details?id=com.revgiler.messenger";
+  const intent = `intent://join/${groupId}#Intent;scheme=uchat;package=com.revgiler.messenger;S.browser_fallback_url=${encodeURIComponent(play)};end`;
+  return html(page("Приглашение в группу", `
+<p>Вас позвали в группу в <b>${APP}</b>.</p>
+<p><a href="${intent}"><button>Открыть в ${APP}</button></a></p>
+<p class="muted">Нет приложения? <a href="${play}">Установите ${APP} из Google Play</a>, затем снова откройте эту ссылку.</p>
+`, `<script>location.href = ${JSON.stringify(intent)};</script>`));
+}
+
 function html(body) {
   return new Response(body, { headers: { "Content-Type": "text/html; charset=utf-8" } });
 }
